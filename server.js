@@ -2,20 +2,24 @@ const http = require('http');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
+const BOARD_SIZE = 10;
+const DEFAULT_SHIPS = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
+const MAX_PLAYERS = 4;
+
+const rooms = new Map();
+
 const server = http.createServer((req, res) => {
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
     }
+
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Battleship WebSocket server is running');
 });
-const wss = new WebSocket.Server({ server });
 
-const BOARD_SIZE = 10;
-const DEFAULT_SHIPS = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
-const rooms = new Map();
+const wss = new WebSocket.Server({ server });
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Battleship server started on http://0.0.0.0:${PORT}`);
@@ -25,12 +29,7 @@ wss.on('connection', (ws) => {
     const playerId = Math.random().toString(36).slice(2, 10);
     let roomId = null;
 
-    ws.send(
-        JSON.stringify({
-            type: 'hello',
-            playerId,
-        })
-    );
+    safeSend(ws, { type: 'hello', playerId });
 
     ws.on('message', (raw) => {
         let data;
@@ -41,117 +40,206 @@ wss.on('connection', (ws) => {
             return;
         }
 
-        if (data.type === 'join') {
-            roomId = String(data.room || '').trim();
-            if (!roomId) {
-                safeSend(ws, { type: 'error', message: 'Введите название комнаты' });
-                return;
-            }
+        if (data.type === 'create-room') {
+            roomId = handleCreateRoom(ws, playerId, data);
+            return;
+        }
 
-            const room = getOrCreateRoom(roomId);
-            if (room.players.length >= 2) {
-                safeSend(ws, { type: 'error', message: 'Комната уже заполнена (2/2)' });
-                return;
-            }
-
-            room.players.push(createPlayer(playerId, ws));
-            broadcastRoomState(room);
+        if (data.type === 'join-room') {
+            roomId = handleJoinRoom(ws, playerId, data);
             return;
         }
 
         if (!roomId) {
-            safeSend(ws, { type: 'error', message: 'Сначала подключитесь к комнате' });
+            safeSend(ws, { type: 'error', message: 'Сначала создайте комнату или подключитесь к ней' });
             return;
         }
 
         const room = rooms.get(roomId);
-        if (!room) return;
+        if (!room) {
+            safeSend(ws, { type: 'error', message: 'Комната не найдена' });
+            return;
+        }
 
         if (data.type === 'place-ships') {
             handlePlaceShips(room, playerId, data.ships);
             return;
         }
 
+        if (data.type === 'start-game') {
+            handleStartGame(room, playerId);
+            return;
+        }
+
         if (data.type === 'move') {
-            handleMove(room, playerId, data.x, data.y);
+            handleMove(room, playerId, data.targetId, data.x, data.y);
         }
     });
 
     ws.on('close', () => {
         if (!roomId) return;
+
         const room = rooms.get(roomId);
         if (!room) return;
 
-        room.players = room.players.filter((p) => p.id !== playerId);
+        room.players = room.players.filter((player) => player.id !== playerId);
+
         if (room.players.length === 0) {
             rooms.delete(roomId);
             return;
         }
 
-        room.status = 'waiting';
-        room.turn = null;
-        room.winner = null;
-        room.players.forEach((p) => {
-            p.ready = false;
-            p.ships = [];
-            p.hits = new Set();
-            p.shots = new Set();
-        });
+        if (room.hostId === playerId) {
+            room.hostId = room.players[0].id;
+        }
 
-        broadcastRoomState(room, `${playerId} отключился. Начните новую партию.`);
+        if (room.status === 'playing') {
+            const disconnected = room.players.find((p) => p.id === playerId);
+            if (disconnected) disconnected.alive = false;
+            settleWinnerIfNeeded(room);
+            moveTurnToNextAlive(room, room.turn);
+        }
+
+        broadcastRoomState(room, `Игрок ${playerId.slice(0, 4)} отключился.`);
     });
 });
 
-function createPlayer(id, ws) {
+function handleCreateRoom(ws, playerId, data) {
+    const roomName = String(data.room || '').trim();
+    const nickname = normalizeNickname(data.nickname, playerId);
+    const maxPlayers = Number(data.maxPlayers);
+
+    if (!roomName) {
+        safeSend(ws, { type: 'error', message: 'Введите код комнаты' });
+        return null;
+    }
+
+    if (rooms.has(roomName)) {
+        safeSend(ws, { type: 'error', message: 'Комната уже существует' });
+        return null;
+    }
+
+    if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > MAX_PLAYERS) {
+        safeSend(ws, { type: 'error', message: 'Лимит игроков: от 2 до 4' });
+        return null;
+    }
+
+    const room = {
+        id: roomName,
+        status: 'waiting',
+        turn: null,
+        winner: null,
+        maxPlayers,
+        hostId: playerId,
+        players: [createPlayer(playerId, nickname, ws)],
+    };
+
+    rooms.set(roomName, room);
+    broadcastRoomState(room, 'Комната создана. Ожидаем игроков.');
+    return roomName;
+}
+
+function handleJoinRoom(ws, playerId, data) {
+    const roomName = String(data.room || '').trim();
+    const nickname = normalizeNickname(data.nickname, playerId);
+
+    if (!roomName) {
+        safeSend(ws, { type: 'error', message: 'Введите код комнаты' });
+        return null;
+    }
+
+    const room = rooms.get(roomName);
+    if (!room) {
+        safeSend(ws, { type: 'error', message: 'Комната не найдена' });
+        return null;
+    }
+
+    if (room.status !== 'waiting') {
+        safeSend(ws, { type: 'error', message: 'Игра уже началась, подключение закрыто' });
+        return null;
+    }
+
+    if (room.players.length >= room.maxPlayers) {
+        safeSend(ws, { type: 'error', message: `Комната заполнена (${room.maxPlayers}/${room.maxPlayers})` });
+        return null;
+    }
+
+    room.players.push(createPlayer(playerId, nickname, ws));
+    broadcastRoomState(room, `${nickname} подключился к комнате.`);
+    return roomName;
+}
+
+function createPlayer(id, nickname, ws) {
     return {
         id,
+        nickname,
         ws,
         ready: false,
+        alive: true,
         ships: [],
-        hits: new Set(),
-        shots: new Set(),
+        hitsTaken: new Set(),
+        shotsByTarget: new Map(),
     };
 }
 
-function getOrCreateRoom(roomId) {
-    if (!rooms.has(roomId)) {
-        rooms.set(roomId, {
-            id: roomId,
-            status: 'waiting',
-            turn: null,
-            winner: null,
-            players: [],
-        });
-    }
-    return rooms.get(roomId);
-}
-
 function handlePlaceShips(room, playerId, ships) {
+    if (room.status !== 'waiting') {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Расстановка доступна только до старта игры' });
+        return;
+    }
+
     const player = room.players.find((p) => p.id === playerId);
     if (!player) return;
 
-    const result = validateShips(ships);
-    if (!result.ok) {
-        safeSend(player.ws, { type: 'error', message: result.message });
+    const validation = validateShips(ships);
+    if (!validation.ok) {
+        safeSend(player.ws, { type: 'error', message: validation.message });
         return;
     }
 
     player.ships = ships;
     player.ready = true;
 
-    const readyCount = room.players.filter((p) => p.ready).length;
-    if (room.players.length === 2 && readyCount === 2) {
-        room.status = 'playing';
-        room.turn = room.players[0].id;
-        room.winner = null;
-    }
-
-    broadcastRoomState(room);
+    broadcastRoomState(room, `${player.nickname} подтвердил расстановку.`);
 }
 
-function handleMove(room, playerId, x, y) {
+function handleStartGame(room, playerId) {
+    if (room.hostId !== playerId) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Только создатель может запустить игру' });
+        return;
+    }
+
+    if (room.status !== 'waiting') {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Игра уже запущена' });
+        return;
+    }
+
+    if (room.players.length !== room.maxPlayers) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Не все игроки подключились' });
+        return;
+    }
+
+    const allReady = room.players.every((player) => player.ready);
+    if (!allReady) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Не все игроки подтвердили флот' });
+        return;
+    }
+
+    room.status = 'playing';
+    room.winner = null;
+    room.players.forEach((player) => {
+        player.alive = true;
+        player.hitsTaken = new Set();
+        player.shotsByTarget = new Map();
+    });
+    room.turn = room.players[0].id;
+
+    broadcastRoomState(room, 'Игра запущена создателем комнаты.');
+}
+
+function handleMove(room, playerId, targetId, x, y) {
     if (room.status !== 'playing') {
-        safeSendToPlayer(room, playerId, { type: 'error', message: 'Игра ещё не началась' });
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Игра не запущена' });
         return;
     }
 
@@ -165,69 +253,117 @@ function handleMove(room, playerId, x, y) {
         return;
     }
 
-    const attacker = room.players.find((p) => p.id === playerId);
-    const defender = room.players.find((p) => p.id !== playerId);
+    const attacker = room.players.find((player) => player.id === playerId);
+    const defender = room.players.find((player) => player.id === targetId);
+
     if (!attacker || !defender) return;
 
-    const key = pointKey(x, y);
-    if (attacker.shots.has(key)) {
-        safeSend(attacker.ws, { type: 'error', message: 'Вы уже стреляли в эту клетку' });
+    if (!defender.alive) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Этот игрок уже выбыл' });
         return;
     }
 
-    attacker.shots.add(key);
-    const isHit = isShipAt(defender.ships, x, y);
-    if (isHit) {
-        defender.hits.add(key);
+    if (attacker.id === defender.id) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Нельзя стрелять в себя' });
+        return;
     }
 
-    const sunkShip = isHit ? findSunkShip(defender.ships, defender.hits, x, y) : null;
-    const allSunk = defender.ships.every((ship) => ship.cells.every((c) => defender.hits.has(pointKey(c.x, c.y))));
+    const targetShots = attacker.shotsByTarget.get(defender.id) || new Set();
+    const key = pointKey(x, y);
 
-    if (allSunk) {
-        room.status = 'finished';
-        room.winner = attacker.id;
-        room.turn = null;
-    } else if (!isHit) {
-        room.turn = defender.id;
+    if (targetShots.has(key)) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Вы уже стреляли в эту клетку выбранного поля' });
+        return;
+    }
+
+    targetShots.add(key);
+    attacker.shotsByTarget.set(defender.id, targetShots);
+
+    const hit = isShipAt(defender.ships, x, y);
+    if (hit) {
+        defender.hitsTaken.add(key);
+    }
+
+    if (defender.alive && areAllShipsSunk(defender)) {
+        defender.alive = false;
+    }
+
+    settleWinnerIfNeeded(room);
+
+    if (room.status === 'playing') {
+        moveTurnToNextAlive(room, attacker.id);
     }
 
     broadcast(room, {
         type: 'move-result',
         roomId: room.id,
         from: attacker.id,
+        to: defender.id,
         target: { x, y },
-        hit: isHit,
-        sunk: Boolean(sunkShip),
-        sunkSize: sunkShip?.cells.length || 0,
-        nextTurn: room.turn,
+        hit,
         winner: room.winner,
     });
 
     broadcastRoomState(room);
 }
 
+function settleWinnerIfNeeded(room) {
+    const alivePlayers = room.players.filter((player) => player.alive);
+    if (alivePlayers.length === 1 && room.status === 'playing') {
+        room.status = 'finished';
+        room.winner = alivePlayers[0].id;
+        room.turn = null;
+    }
+}
+
+function moveTurnToNextAlive(room, currentPlayerId) {
+    const alivePlayers = room.players.filter((player) => player.alive);
+    if (alivePlayers.length <= 1) {
+        room.turn = null;
+        return;
+    }
+
+    const currentIndex = alivePlayers.findIndex((player) => player.id === currentPlayerId);
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % alivePlayers.length;
+    room.turn = alivePlayers[nextIndex].id;
+}
+
 function broadcastRoomState(room, infoMessage = null) {
-    const playerIds = room.players.map((p) => p.id);
+    room.players.forEach((viewer) => {
+        const opponents = room.players.filter((player) => player.id !== viewer.id);
+        const shotBoards = {};
 
-    room.players.forEach((player) => {
-        const enemy = room.players.find((p) => p.id !== player.id);
+        opponents.forEach((opponent) => {
+            const yourShots = Array.from(viewer.shotsByTarget.get(opponent.id) || []).map(keyToPoint);
+            const hitsOnOpponent = yourShots.filter((point) => opponent.hitsTaken.has(pointKey(point.x, point.y)));
+            const shotsFromOpponent = Array.from(opponent.shotsByTarget.get(viewer.id) || []).map(keyToPoint);
 
-        safeSend(player.ws, {
+            shotBoards[opponent.id] = {
+                yourShots,
+                hitsOnOpponent,
+                shotsFromOpponent,
+            };
+        });
+
+        safeSend(viewer.ws, {
             type: 'room-state',
             roomId: room.id,
             status: room.status,
             turn: room.turn,
             winner: room.winner,
             infoMessage,
-            you: player.id,
-            players: playerIds,
-            ready: room.players.map((p) => ({ id: p.id, ready: p.ready })),
-            yourShips: player.ships,
-            yourHitsTaken: Array.from(player.hits).map(keyToPoint),
-            yourShots: Array.from(player.shots).map(keyToPoint),
-            enemyHitsTaken: enemy ? Array.from(enemy.hits).map(keyToPoint) : [],
-            enemyShots: enemy ? Array.from(enemy.shots).map(keyToPoint) : [],
+            hostId: room.hostId,
+            maxPlayers: room.maxPlayers,
+            you: viewer.id,
+            players: room.players.map((player) => ({
+                id: player.id,
+                nickname: player.nickname,
+                ready: player.ready,
+                alive: player.alive,
+            })),
+            yourShips: viewer.ships,
+            yourHitsTaken: Array.from(viewer.hitsTaken).map(keyToPoint),
+            shotBoards,
         });
     });
 }
@@ -237,14 +373,20 @@ function broadcast(room, payload) {
 }
 
 function safeSendToPlayer(room, playerId, payload) {
-    const player = room.players.find((p) => p.id === playerId);
+    const player = room.players.find((candidate) => candidate.id === playerId);
     if (player) safeSend(player.ws, payload);
 }
 
-function safeSend(ws, data) {
+function safeSend(ws, payload) {
     if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
+        ws.send(JSON.stringify(payload));
     }
+}
+
+function normalizeNickname(nickname, fallbackId) {
+    const cleaned = String(nickname || '').trim();
+    if (!cleaned) return `Player-${fallbackId.slice(0, 4)}`;
+    return cleaned.slice(0, 18);
 }
 
 function validateShips(ships) {
@@ -252,9 +394,8 @@ function validateShips(ships) {
         return { ok: false, message: 'Неверное количество кораблей' };
     }
 
-    const sizes = ships.map((s) => (Array.isArray(s.cells) ? s.cells.length : 0)).sort((a, b) => b - a);
+    const sizes = ships.map((ship) => (Array.isArray(ship.cells) ? ship.cells.length : 0)).sort((a, b) => b - a);
     const expected = [...DEFAULT_SHIPS].sort((a, b) => b - a);
-
     if (JSON.stringify(sizes) !== JSON.stringify(expected)) {
         return { ok: false, message: 'Неверная конфигурация флота' };
     }
@@ -266,8 +407,8 @@ function validateShips(ships) {
             return { ok: false, message: 'Корабль без клеток' };
         }
 
-        const xs = ship.cells.map((c) => c.x);
-        const ys = ship.cells.map((c) => c.y);
+        const xs = ship.cells.map((cell) => cell.x);
+        const ys = ship.cells.map((cell) => cell.y);
         const sameX = xs.every((x) => x === xs[0]);
         const sameY = ys.every((y) => y === ys[0]);
 
@@ -276,15 +417,17 @@ function validateShips(ships) {
         }
 
         const sorted = [...ship.cells].sort((a, b) => (sameX ? a.y - b.y : a.x - b.x));
+
         for (let i = 0; i < sorted.length; i++) {
             const cell = sorted[i];
             if (!isInsideBoard(cell.x, cell.y)) {
                 return { ok: false, message: 'Корабль выходит за границы поля' };
             }
+
             if (i > 0) {
                 const prev = sorted[i - 1];
-                const dist = Math.abs(prev.x - cell.x) + Math.abs(prev.y - cell.y);
-                if (dist !== 1) {
+                const distance = Math.abs(prev.x - cell.x) + Math.abs(prev.y - cell.y);
+                if (distance !== 1) {
                     return { ok: false, message: 'Клетки корабля должны идти подряд' };
                 }
             }
@@ -307,12 +450,12 @@ function validateShips(ships) {
         const { x, y } = keyToPoint(key);
         for (const [dx, dy] of neighbors) {
             const nKey = pointKey(x + dx, y + dy);
-            if (occupied.has(nKey)) {
-                const cellShip = shipIndexByCell(ships, x, y);
-                const neighShip = shipIndexByCell(ships, x + dx, y + dy);
-                if (cellShip !== neighShip) {
-                    return { ok: false, message: 'Корабли не должны соприкасаться' };
-                }
+            if (!occupied.has(nKey)) continue;
+
+            const shipA = shipIndexByCell(ships, x, y);
+            const shipB = shipIndexByCell(ships, x + dx, y + dy);
+            if (shipA !== shipB) {
+                return { ok: false, message: 'Корабли не должны соприкасаться' };
             }
         }
     }
@@ -321,11 +464,19 @@ function validateShips(ships) {
 }
 
 function shipIndexByCell(ships, x, y) {
-    return ships.findIndex((ship) => ship.cells.some((c) => c.x === x && c.y === y));
+    return ships.findIndex((ship) => ship.cells.some((cell) => cell.x === x && cell.y === y));
+}
+
+function areAllShipsSunk(player) {
+    return player.ships.every((ship) => ship.cells.every((cell) => player.hitsTaken.has(pointKey(cell.x, cell.y))));
 }
 
 function isInsideBoard(x, y) {
     return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < BOARD_SIZE && y < BOARD_SIZE;
+}
+
+function isShipAt(ships, x, y) {
+    return ships.some((ship) => ship.cells.some((cell) => cell.x === x && cell.y === y));
 }
 
 function pointKey(x, y) {
@@ -335,15 +486,4 @@ function pointKey(x, y) {
 function keyToPoint(key) {
     const [x, y] = key.split(':').map(Number);
     return { x, y };
-}
-
-function isShipAt(ships, x, y) {
-    return ships.some((ship) => ship.cells.some((cell) => cell.x === x && cell.y === y));
-}
-
-function findSunkShip(ships, hits, x, y) {
-    const target = ships.find((ship) => ship.cells.some((cell) => cell.x === x && cell.y === y));
-    if (!target) return null;
-    const sunk = target.cells.every((cell) => hits.has(pointKey(cell.x, cell.y)));
-    return sunk ? target : null;
 }

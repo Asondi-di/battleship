@@ -1,37 +1,66 @@
 <!doctype html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8"/>
     <title>Battleship LAN</title>
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<h2>Морской бой (LAN)</h2>
+<div class="app">
+    <header>
+        <h1>Battleship Arena</h1>
+        <p>Chrome extension, комнаты до 4 игроков, запуск только от хоста.</p>
+    </header>
 
-<label>Сервер WebSocket (пример: ws://192.168.1.20:3000)</label>
-<input id="serverUrl" value="ws://localhost:3000" />
+    <section class="panel">
+        <div class="field">
+            <label>Сервер WebSocket</label>
+            <input id="serverUrl" value="ws://localhost:3000"/>
+        </div>
+        <div class="field">
+            <label>Ваш ник</label>
+            <input id="nickname" placeholder="например: Captain"/>
+        </div>
+        <div class="field">
+            <label>Код комнаты</label>
+            <input id="room" placeholder="например: squad-1"/>
+        </div>
+        <div class="field">
+            <label>Лимит игроков (для создателя)</label>
+            <select id="maxPlayers">
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4" selected>4</option>
+            </select>
+        </div>
 
-<label>Комната</label>
-<input id="room" placeholder="например: office-team" />
+        <div class="actions">
+            <button id="createRoom">Создать комнату</button>
+            <button id="joinRoom">Подключиться</button>
+            <button id="autoPlace" disabled>Авторасстановка</button>
+            <button id="sendFleet" disabled>Подтвердить флот</button>
+            <button id="startGame" disabled>Запустить игру</button>
+        </div>
 
-<button id="connect">Подключиться</button>
-
-<p id="status">Статус: не подключено</p>
-<p id="players">Игроки: -</p>
-
-<div class="actions">
-    <button id="autoPlace" disabled>Авторасстановка кораблей</button>
-    <button id="sendFleet" disabled>Подтвердить расстановку</button>
-</div>
-
-<div class="boards">
-    <section>
-        <h3>Ваше поле</h3>
-        <div id="myBoard" class="board"></div>
+        <p id="status">Статус: не подключено</p>
+        <p id="roomMeta">Комната: -</p>
+        <div id="players" class="players"></div>
     </section>
-    <section>
-        <h3>Поле противника</h3>
-        <div id="enemyBoard" class="board"></div>
+
+    <section class="battle-grid">
+        <article class="board-card">
+            <h3>Ваше поле</h3>
+            <div id="myBoard" class="board"></div>
+        </article>
+
+
+        <article class="board-card">
+            <div class="target-row">
+                <h3>Атака</h3>
+                <select id="targetSelect"></select>
+            </div>
+            <div id="enemyBoard" class="board"></div>
+        </article>
     </section>
 </div>
 

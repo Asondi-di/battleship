@@ -1,64 +1,159 @@
+:root {
+    --bg: #0b1020;
+    --panel: #111a33;
+    --panel-2: #182445;
+    --accent: #5dd6ff;
+    --accent-2: #7c5cff;
+    --text: #eef3ff;
+    --muted: #9fb2da;
+    --hit: #ff4d6d;
+    --miss: #52b3ff;
+    --ship: #7f8fff;
+}
+
 body {
-    min-width: 720px;
-    font-family: Arial, sans-serif;
-    padding: 10px;
+    margin: 0;
+    min-width: 940px;
+    font-family: Inter, Segoe UI, Arial, sans-serif;
+    color: var(--text);
+    background: radial-gradient(circle at 10% 10%, #1b2d66 0%, #091124 42%, #060a18 100%);
+}
+
+.app {
+    padding: 16px;
+}
+
+h1 {
+    margin: 0;
+    font-size: 24px;
+}
+
+header p {
+    margin-top: 6px;
+    color: var(--muted);
+}
+
+.panel,
+.board-card {
+    background: linear-gradient(140deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+    border: 1px solid rgba(146, 171, 255, 0.25);
+    border-radius: 14px;
+    padding: 14px;
+    backdrop-filter: blur(4px);
+}
+
+.panel {
+    margin-top: 12px;
+}
+
+.field {
+    margin-bottom: 8px;
 }
 
 label {
     display: block;
+    color: var(--muted);
+    margin-bottom: 4px;
     font-size: 12px;
-    margin-top: 8px;
 }
 
-input {
+input,
+select,
+button {
+    border-radius: 8px;
+    border: 1px solid rgba(146, 171, 255, 0.3);
+    background: var(--panel-2);
+    color: var(--text);
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+input,
+select {
     width: 100%;
     box-sizing: border-box;
-    padding: 6px;
-}
-
-button {
-    margin-top: 8px;
-    padding: 6px 10px;
 }
 
 .actions {
-    display: flex;
+    margin-top: 8px;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(120px, 1fr));
     gap: 8px;
-    margin-bottom: 8px;
 }
 
-.boards {
+button {
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+button:hover:enabled {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.players {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.player-badge {
+    background: rgba(8, 16, 35, 0.7);
+    border: 1px solid rgba(146, 171, 255, 0.2);
+    border-radius: 10px;
+    padding: 8px;
+    display: grid;
+    gap: 2px;
+    font-size: 12px;
+}
+
+.battle-grid {
+    margin-top: 14px;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 16px;
+    gap: 14px;
+}
+
+.target-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
 }
 
 .board {
+    margin-top: 8px;
     display: grid;
-    grid-template-columns: repeat(10, 24px);
-    gap: 2px;
+    grid-template-columns: repeat(10, 28px);
+    gap: 3px;
 }
 
 .cell {
-    width: 24px;
-    height: 24px;
-    border: 1px solid #bbb;
-    background: #f5f5f5;
-    cursor: default;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(146, 171, 255, 0.35);
+    background: #0b1738;
+    border-radius: 5px;
+    padding: 0;
 }
 
 .cell.enemy {
-    cursor: pointer;
+    cursor: crosshair;
 }
 
 .cell.ship {
-    background: #7a8cff;
+    background: linear-gradient(135deg, #6475ff, var(--ship));
 }
 
 .cell.hit {
-    background: #ff4747;
+    background: linear-gradient(135deg, #ff3368, var(--hit));
 }
 
 .cell.miss {
-    background: #56b6ff;
+    background: linear-gradient(135deg, #2f9dff, var(--miss));
 }
