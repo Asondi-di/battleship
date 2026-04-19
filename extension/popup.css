@@ -1,0 +1,49 @@
+:root {
+    --bg: #0b1020;
+    --panel: #111a33;
+    --text: #eef3ff;
+    --muted: #9fb2da;
+    --accent: #5dd6ff;
+}
+
+body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 160px;
+    font-family: Inter, Segoe UI, Arial, sans-serif;
+    color: var(--text);
+    background: radial-gradient(circle at 10% 10%, #1b2d66 0%, #091124 42%, #060a18 100%);
+}
+
+.launcher {
+    padding: 16px;
+}
+
+h1 {
+    margin: 0;
+    font-size: 22px;
+}
+
+p {
+    margin: 10px 0 14px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--muted);
+}
+
+button {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid rgba(146, 171, 255, 0.35);
+    background: var(--panel);
+    color: var(--text);
+    padding: 10px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+button:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
