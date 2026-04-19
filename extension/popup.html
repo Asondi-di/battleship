@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <title>Battleship LAN</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<h2>Морской бой (LAN)</h2>
+
+<label>Сервер WebSocket (пример: ws://192.168.1.20:3000)</label>
+<input id="serverUrl" value="ws://localhost:3000" />
+
+<label>Комната</label>
+<input id="room" placeholder="например: office-team" />
+
+<button id="connect">Подключиться</button>
+
+<p id="status">Статус: не подключено</p>
+<p id="players">Игроки: -</p>
+
+<div class="actions">
+    <button id="autoPlace" disabled>Авторасстановка кораблей</button>
+    <button id="sendFleet" disabled>Подтвердить расстановку</button>
+</div>
+
+<div class="boards">
+    <section>
+        <h3>Ваше поле</h3>
+        <div id="myBoard" class="board"></div>
+    </section>
+    <section>
+        <h3>Поле противника</h3>
+        <div id="enemyBoard" class="board"></div>
+    </section>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
