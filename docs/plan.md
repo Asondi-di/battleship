@@ -1,216 +1,243 @@
-# **🔧 Архитектура**
+# План реализации Battleship LAN
 
-**1\. Chrome Extension**
+## 1. Архитектура
 
-* интерфейс (поле, кнопки)  
-* подключение к серверу через WebSocket
+Проект состоит из двух частей:
 
-**2\. Локальный сервер (Node.js)**
+1. **Chrome Extension (клиент)**
+    - интерфейс игры (поле, кнопки, ввод комнаты);
+    - подключение к серверу по WebSocket;
+    - отправка и получение игровых ходов.
 
-* хранит игроков  
-* управляет комнатами  
-* синхронизирует ходы
+2. **Локальный сервер на Node.js**
+    - хранение списка комнат и игроков;
+    - обработка подключений/отключений;
+    - синхронизация ходов между участниками комнаты.
 
 ---
 
-# **🚀 Шаг 1\. Сервер (Node.js)**
+## 2. Шаг 1 — Сервер (Node.js)
 
-Установка:
+### Установка
 
-mkdir battleship  
-cd battleship  
-npm init \-y  
+```bash
+mkdir battleship
+cd battleship
+npm init -y
 npm install ws express
+```
 
-### **`server.js`**
+### Файл `server.js`
 
-const express \= require('express');  
-const WebSocket \= require('ws');
+```js
+const express = require('express');
+const WebSocket = require('ws');
 
-const app \= express();  
-const server \= app.listen(3000, () \=\> {  
-   console.log('Server running on http://localhost:3000');  
+const app = express();
+const server = app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000');
 });
 
-const wss \= new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server });
 
-let rooms \= {};
+let rooms = {};
 
-wss.on('connection', (ws) \=\> {  
-   let currentRoom \= null;  
-   let playerId \= Math.random().toString(36).substr(2, 9);
+wss.on('connection', (ws) => {
+  let currentRoom = null;
+  let playerId = Math.random().toString(36).substr(2, 9);
 
-   ws.on('message', (message) \=\> {  
-       const data \= JSON.parse(message);
+  ws.on('message', (message) => {
+    const data = JSON.parse(message);
 
-       if (data.type \=== 'join') {  
-           currentRoom \= data.room;
+    if (data.type === 'join') {
+      currentRoom = data.room;
 
-           if (\!rooms\[currentRoom\]) {  
-               rooms\[currentRoom\] \= \[\];  
-           }
+      if (!rooms[currentRoom]) {
+        rooms[currentRoom] = [];
+      }
 
-           rooms\[currentRoom\].push({ ws, playerId });
+      rooms[currentRoom].push({ ws, playerId });
 
-           broadcast(currentRoom, {  
-               type: 'players',  
-               players: rooms\[currentRoom\].map(p \=\> p.playerId)  
-           });  
-       }
+      broadcast(currentRoom, {
+        type: 'players',
+        players: rooms[currentRoom].map((p) => p.playerId),
+      });
+    }
 
-       if (data.type \=== 'move') {  
-           broadcast(currentRoom, {  
-               type: 'move',  
-               from: playerId,  
-               x: data.x,  
-               y: data.y  
-           });  
-       }  
-   });
+    if (data.type === 'move') {
+      broadcast(currentRoom, {
+        type: 'move',
+        from: playerId,
+        x: data.x,
+        y: data.y,
+      });
+    }
+  });
 
-   ws.on('close', () \=\> {  
-       if (currentRoom && rooms\[currentRoom\]) {  
-           rooms\[currentRoom\] \= rooms\[currentRoom\].filter(p \=\> p.ws \!== ws);  
-       }  
-   });  
+  ws.on('close', () => {
+    if (currentRoom && rooms[currentRoom]) {
+      rooms[currentRoom] = rooms[currentRoom].filter((p) => p.ws !== ws);
+    }
+  });
 });
 
-function broadcast(room, data) {  
-   rooms\[room\].forEach(player \=\> {  
-       player.ws.send(JSON.stringify(data));  
-   });  
-}  
+function broadcast(room, data) {
+  rooms[room].forEach((player) => {
+    player.ws.send(JSON.stringify(data));
+  });
+}
+```
+
 ---
 
-# **🧩 Шаг 2\. Chrome Extension**
+## 3. Шаг 2 — Chrome Extension
 
-## **📁 Структура**
+### Структура
 
-extension/  
-├── manifest.json  
-├── popup.html  
-├── popup.js  
-└── style.css  
----
+```text
+extension/
+├── manifest.json
+├── popup.html
+├── popup.js
+└── style.css
+```
 
-## **`manifest.json`**
+### Файл `manifest.json`
 
-{  
- "manifest\_version": 3,  
- "name": "Battleship LAN",  
- "version": "1.0",  
- "action": {  
-   "default\_popup": "popup.html"  
- },  
- "permissions": \["storage"\]  
-}  
----
+```json
+{
+  "manifest_version": 3,
+  "name": "Battleship LAN",
+  "version": "1.0",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage"]
+}
+```
 
-## **`popup.html`**
+### Файл `popup.html`
 
-\<\!DOCTYPE html\>  
-\<html\>  
-\<head\>  
-\<link rel="stylesheet" href="style.css"\>  
-\</head\>  
-\<body\>
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <h3>Морской бой</h3>
 
-\<h3\>Морской бой\</h3\>
+    <input id="room" placeholder="Комната" />
+    <button id="connect">Подключиться</button>
 
-\<input id="room" placeholder="Комната"\>  
-\<button id="connect"\>Подключиться\</button\>
+    <div id="game"></div>
 
-\<div id="game"\>\</div\>
+    <script src="popup.js"></script>
+  </body>
+</html>
+```
 
-\<script src="popup.js"\>\</script\>  
-\</body\>  
-\</html\>  
----
+### Файл `style.css`
 
-## **`style.css`**
-
-\#game {  
-   display: grid;  
-   grid-template-columns: repeat(10, 30px);  
-   gap: 2px;  
-   margin-top: 10px;  
+```css
+#game {
+  display: grid;
+  grid-template-columns: repeat(10, 30px);
+  gap: 2px;
+  margin-top: 10px;
 }
 
-.cell {  
-   width: 30px;  
-   height: 30px;  
-   background: \#ddd;  
-   cursor: pointer;  
+.cell {
+  width: 30px;
+  height: 30px;
+  background: #ddd;
+  cursor: pointer;
 }
 
-.hit {  
-   background: red;  
+.hit {
+  background: red;
 }
 
-.miss {  
-   background: blue;  
-}  
+.miss {
+  background: blue;
+}
+```
+
+### Файл `popup.js`
+
+```js
+let ws;
+const game = document.getElementById('game');
+
+function createGrid() {
+  game.innerHTML = '';
+  for (let y = 0; y < 10; y++) {
+    for (let x = 0; x < 10; x++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+
+      cell.onclick = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'move',
+            x,
+            y,
+          })
+        );
+      };
+
+      cell.dataset.x = x;
+      cell.dataset.y = y;
+
+      game.appendChild(cell);
+    }
+  }
+}
+
+document.getElementById('connect').onclick = () => {
+  const room = document.getElementById('room').value;
+
+  ws = new WebSocket('ws://localhost:3000');
+
+  ws.onopen = () => {
+    ws.send(
+      JSON.stringify({
+        type: 'join',
+        room,
+      })
+    );
+  };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    if (data.type === 'move') {
+      const cells = document.querySelectorAll('.cell');
+
+      cells.forEach((cell) => {
+        if (cell.dataset.x == data.x && cell.dataset.y == data.y) {
+          cell.classList.add('hit');
+        }
+      });
+    }
+  };
+
+  createGrid();
+};
+```
+
 ---
 
-## **`popup.js`**
+## 4. Как запускать
 
-let ws;  
-const game \= document.getElementById('game');
+1. Запустить сервер:
 
-function createGrid() {  
-   game.innerHTML \= '';  
-   for (let y \= 0; y \< 10; y++) {  
-       for (let x \= 0; x \< 10; x++) {  
-           const cell \= document.createElement('div');  
-           cell.className \= 'cell';
+```bash
+node server.js
+```
 
-           cell.onclick \= () \=\> {  
-               ws.send(JSON.stringify({  
-                   type: 'move',  
-                   x, y  
-               }));  
-           };
-
-           cell.dataset.x \= x;  
-           cell.dataset.y \= y;
-
-           game.appendChild(cell);  
-       }  
-   }  
-}
-
-document.getElementById('connect').onclick \= () \=\> {  
-   const room \= document.getElementById('room').value;
-
-   ws \= new WebSocket('ws://localhost:3000');
-
-   ws.onopen \= () \=\> {  
-       ws.send(JSON.stringify({  
-           type: 'join',  
-           room  
-       }));  
-   };
-
-   ws.onmessage \= (event) \=\> {  
-       const data \= JSON.parse(event.data);
-
-       if (data.type \=== 'move') {  
-           const cells \= document.querySelectorAll('.cell');
-
-           cells.forEach(cell \=\> {  
-               if (  
-                   cell.dataset.x \== data.x &&  
-                   cell.dataset.y \== data.y  
-               ) {  
-                   cell.classList.add('hit');  
-               }  
-           });  
-       }  
-   };
-
-   createGrid();  
-};  
----
+2. Загрузить `extension/` как распакованное расширение в Chrome.
+3. Открыть popup расширения, ввести название комнаты и подключиться.
 
 # **🧪 Как запускать**
 
