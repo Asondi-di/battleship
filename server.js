@@ -1,4 +1,5 @@
 const http = require('http');
+const os = require('os');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
@@ -9,9 +10,34 @@ const MAX_PLAYERS = 4;
 const rooms = new Map();
 
 const server = http.createServer((req, res) => {
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
+        return;
+    }
+
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+        return;
+    }
+
+    if (req.url === '/network-info') {
+        const ips = getLanIPv4Addresses();
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({
+            ok: true,
+            port: PORT,
+            ips,
+            wsUrls: ips.map((ip) => `ws://${ip}:${PORT}`),
+        }));
         return;
     }
 
@@ -486,4 +512,20 @@ function pointKey(x, y) {
 function keyToPoint(key) {
     const [x, y] = key.split(':').map(Number);
     return { x, y };
+}
+
+function getLanIPv4Addresses() {
+    const interfaces = os.networkInterfaces();
+    const ips = [];
+
+    Object.values(interfaces).forEach((entries) => {
+        if (!Array.isArray(entries)) return;
+        entries.forEach((entry) => {
+            if (entry && entry.family === 'IPv4' && !entry.internal) {
+                ips.push(entry.address);
+            }
+        });
+    });
+
+    return Array.from(new Set(ips));
 }

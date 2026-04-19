@@ -20,6 +20,7 @@ const state = {
 };
 
 const serverUrlEl = document.getElementById('serverUrl');
+const detectServerUrlBtn = document.getElementById('detectServerUrl');
 const nicknameEl = document.getElementById('nickname');
 const roomEl = document.getElementById('room');
 const maxPlayersEl = document.getElementById('maxPlayers');
@@ -37,6 +38,7 @@ const targetSelectEl = document.getElementById('targetSelect');
 
 createRoomBtn.onclick = () => connect('create-room');
 joinRoomBtn.onclick = () => connect('join-room');
+detectServerUrlBtn.onclick = detectServerUrl;
 autoPlaceBtn.onclick = autoPlace;
 sendFleetBtn.onclick = sendFleet;
 startGameBtn.onclick = startGame;
@@ -105,6 +107,32 @@ function connect(action) {
 
     ws.onclose = () => setStatus('Отключено от сервера');
     ws.onerror = () => setStatus('Ошибка подключения');
+}
+
+async function detectServerUrl() {
+    detectServerUrlBtn.disabled = true;
+
+    try {
+        const response = await fetch('http://localhost:3000/network-info');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const url = Array.isArray(data.wsUrls) && data.wsUrls.length ? data.wsUrls[0] : '';
+
+        if (!url) {
+            alert('Не удалось определить адрес. Проверьте, что сервер запущен на этом ПК.');
+            return;
+        }
+
+        serverUrlEl.value = url;
+        setStatus(`Автоподстановка: ${url}`);
+    } catch {
+        alert('Не удалось получить IP хоста. Запустите сервер (npm start) на этом ПК или введите адрес вручную.');
+    } finally {
+        detectServerUrlBtn.disabled = false;
+    }
 }
 
 function applyRoomState(data) {
