@@ -9,7 +9,7 @@
 <div class="app">
     <header>
         <h1>Battleship Arena</h1>
-        <p>Chrome extension, комнаты до 4 игроков, запуск только от хоста.</p>
+        <p>Тактический LAN-морской бой: до 4 игроков, рейтинг, журнал и умные подсказки.</p>
     </header>
 
     <section class="panel">
@@ -26,7 +26,11 @@
         </div>
         <div class="field">
             <label>Код комнаты</label>
-            <input id="room" placeholder="например: squad-1"/>
+            <div class="room-row">
+                <input id="room" placeholder="например: squad-1"/>
+                <button id="randomRoom" type="button">🎲 Сгенерировать</button>
+                <button id="copyInvite" type="button">📋 Копировать инвайт</button>
+            </div>
         </div>
         <div class="field">
             <label>Лимит игроков (для создателя)</label>
@@ -43,18 +47,40 @@
             <button id="autoPlace" disabled>Авторасстановка</button>
             <button id="sendFleet" disabled>Подтвердить флот</button>
             <button id="startGame" disabled>Запустить игру</button>
+            <button id="reconnect" type="button">Переподключиться</button>
+        </div>
+
+        <div class="toggles">
+            <label class="inline"><input id="soundToggle" type="checkbox" checked/> Звуки</label>
         </div>
 
         <p id="status">Статус: не подключено</p>
         <p id="turnBanner" class="turn-banner">Ожидание подключения…</p>
         <p id="roomMeta">Комната: -</p>
+
+        <div class="progress-cards">
+            <div class="progress-card">
+                <h4>Готовность лобби</h4>
+                <p id="lobbyProgress">0/0 игроков готовы</p>
+                <div class="progress"><span id="lobbyProgressBar"></span></div>
+            </div>
+            <div class="progress-card">
+                <h4>Ваш прогресс</h4>
+                <p id="myProgress">Попаданий: 0 · Точность: 0%</p>
+                <div class="progress"><span id="myProgressBar"></span></div>
+            </div>
+        </div>
+
         <div id="players" class="players"></div>
         <div class="leaderboard-card">
             <h3>Рейтинг матча</h3>
             <div id="leaderboard" class="leaderboard"></div>
         </div>
         <div class="events-card">
-            <h3>События</h3>
+            <div class="title-row">
+                <h3>События</h3>
+                <button id="clearEvents" type="button">Очистить</button>
+            </div>
             <div id="events" class="events"></div>
         </div>
     </section>
@@ -65,13 +91,13 @@
             <div id="myBoard" class="board"></div>
         </article>
 
-
         <article class="board-card">
             <div class="target-row">
                 <h3>Атака</h3>
                 <select id="targetSelect"></select>
             </div>
             <div id="enemyBoard" class="board"></div>
+            <p id="targetStats" class="target-stats">Выберите цель, чтобы увидеть статистику.</p>
         </article>
     </section>
 </div>
