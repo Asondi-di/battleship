@@ -21,6 +21,7 @@ const state = {
     winner: null,
     players: [],
     myShips: [],
+    fleetDraft: [],
     myHitsTaken: [],
     shotBoards: {},
     chat: [],
@@ -148,7 +149,10 @@ function connect(action) {
     if (!room) return alert('Введите код комнаты');
     if (!serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) return alert('Некорректный URL WebSocket');
 
-    if (ws && ws.readyState <= 1) ws.close();
+    if (ws && ws.readyState <= 1) {
+        ws._intentionalClose = true;
+        ws.close();
+    }
 
     persistSettingsFromFields();
     pendingAction = { type: action, room, nickname, maxPlayers: Number(maxPlayersEl.value), clientId: state.clientId };
@@ -164,7 +168,7 @@ function connect(action) {
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (data.type === 'hello') return void (state.playerId = data.playerId);
+        if (data.type === 'hello') return;
         if (data.type === 'error') return alert(data.message);
         if (data.type === 'move-result') return handleMoveResult(data);
         if (data.type === 'room-state') return applyRoomState(data);
@@ -172,6 +176,7 @@ function connect(action) {
 
     ws.onclose = () => {
         setStatus('Отключено от сервера');
+        if (ws?._intentionalClose) return;
         scheduleReconnect();
     };
     ws.onerror = () => setStatus('Ошибка подключения');
@@ -215,6 +220,7 @@ async function detectServerUrl() {
 }
 
 function applyRoomState(data) {
+    state.playerId = data.you || state.playerId;
     state.roomId = data.roomId;
     state.hostId = data.hostId;
     state.maxPlayers = data.maxPlayers;
@@ -225,6 +231,15 @@ function applyRoomState(data) {
     state.turnTimeoutMs = data.turnTimeoutMs || 30000;
     state.players = data.players || [];
     state.myShips = data.yourShips || [];
+    if (state.status === 'waiting') {
+        if (state.myShips.length) {
+            state.fleetDraft = cloneShips(state.myShips);
+        } else if (!state.fleetDraft.length) {
+            state.fleetDraft = [];
+        }
+    } else {
+        state.fleetDraft = cloneShips(state.myShips);
+    }
     state.myHitsTaken = data.yourHitsTaken || [];
     state.shotBoards = data.shotBoards || {};
     state.leaderboard = data.leaderboard || [];
@@ -236,7 +251,7 @@ function applyRoomState(data) {
 
     autoPlaceBtn.disabled = state.status !== 'waiting';
     clearFleetBtn.disabled = state.status !== 'waiting';
-    sendFleetBtn.disabled = state.myShips.length !== SHIP_SET.length || state.status !== 'waiting';
+    sendFleetBtn.disabled = state.fleetDraft.length !== SHIP_SET.length || state.status !== 'waiting';
 
     const isHost = state.playerId === state.hostId;
     const everyoneJoined = state.players.length === state.maxPlayers;
@@ -418,7 +433,7 @@ function renderShipDock() {
         return;
     }
 
-    const placed = state.myShips.map((ship) => ship.cells.length);
+    const placed = state.fleetDraft.map((ship) => ship.cells.length);
     SHIP_SET.forEach((size, index) => {
         const usedIdx = placed.indexOf(size);
         if (usedIdx !== -1) placed[usedIdx] = -1;
@@ -488,14 +503,14 @@ function playerName(id) {
 }
 
 function autoPlace() {
-    state.myShips = generateFleet();
+    state.fleetDraft = generateFleet();
     pushEvent(`${formatTime(new Date())} ⚙️ Ваш флот автоматически расставлен.`);
     renderBoards();
     renderShipDock();
 }
 
 function clearFleet() {
-    state.myShips = [];
+    state.fleetDraft = [];
     state.selectedDockShipIndex = null;
     renderBoards();
     renderShipDock();
@@ -504,7 +519,8 @@ function clearFleet() {
 
 function sendFleet() {
     if (!ws || ws.readyState !== 1) return alert('Сначала подключитесь к серверу');
-    ws.send(JSON.stringify({ type: 'place-ships', ships: state.myShips }));
+    if (state.fleetDraft.length !== SHIP_SET.length) return alert('Сначала полностью расставьте флот.');
+    ws.send(JSON.stringify({ type: 'place-ships', ships: cloneShips(state.fleetDraft) }));
 }
 
 function startGame() {
@@ -516,7 +532,8 @@ function renderBoards() {
     myBoardEl.innerHTML = '';
     enemyBoardEl.innerHTML = '';
 
-    const myShipKeys = new Set(state.myShips.flatMap((ship) => ship.cells.map((cell) => key(cell.x, cell.y))));
+    const editableShips = state.status === 'waiting' ? state.fleetDraft : state.myShips;
+    const myShipKeys = new Set(editableShips.flatMap((ship) => ship.cells.map((cell) => key(cell.x, cell.y))));
     const myHitKeys = new Set(state.myHitsTaken.map((cell) => key(cell.x, cell.y)));
 
     const selectedBoard = state.shotBoards[state.selectedTargetId] || { yourShots: [], hitsOnOpponent: [] };
@@ -560,7 +577,7 @@ function renderBoards() {
 
 function tryPlaceManualShip(x, y) {
     if (state.selectedDockShipIndex === null) return;
-    const used = state.myShips.map((ship) => ship.cells.length);
+    const used = state.fleetDraft.map((ship) => ship.cells.length);
     const size = SHIP_SET[state.selectedDockShipIndex];
     const alreadyPlacedCount = used.filter((value) => value === size).length;
     const allowedCount = SHIP_SET.filter((value) => value === size).length;
@@ -573,7 +590,7 @@ function tryPlaceManualShip(x, y) {
         cells.push({ x: cx, y: cy });
     }
 
-    const occupied = new Set(state.myShips.flatMap((ship) => ship.cells.map((c) => key(c.x, c.y))));
+    const occupied = new Set(state.fleetDraft.flatMap((ship) => ship.cells.map((c) => key(c.x, c.y))));
     for (const cell of cells) {
         if (cell.x < 0 || cell.y < 0 || cell.x >= BOARD_SIZE || cell.y >= BOARD_SIZE) return;
         for (let dy = -1; dy <= 1; dy += 1) {
@@ -583,11 +600,11 @@ function tryPlaceManualShip(x, y) {
         }
     }
 
-    state.myShips.push({ cells });
+    state.fleetDraft.push({ cells });
     state.selectedDockShipIndex = null;
     renderBoards();
     renderShipDock();
-    if (state.myShips.length === SHIP_SET.length) unlockAchievement('Адмирал логистики');
+    if (state.fleetDraft.length === SHIP_SET.length) unlockAchievement('Адмирал логистики');
 }
 
 function attack(targetId, x, y, alreadyShot, cellEl) {
@@ -750,4 +767,10 @@ function escapeHtml(text) {
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#039;');
+}
+
+function cloneShips(ships) {
+    return (ships || []).map((ship) => ({
+        cells: (ship.cells || []).map((cell) => ({ x: cell.x, y: cell.y })),
+    }));
 }
