@@ -78,10 +78,11 @@ setInterval(() => {
 }, 1000);
 
 wss.on('connection', (ws) => {
-    const playerId = Math.random().toString(36).slice(2, 10);
+    const socketPlayerId = Math.random().toString(36).slice(2, 10);
+    let playerId = socketPlayerId;
     let roomId = null;
 
-    safeSend(ws, { type: 'hello', playerId });
+    safeSend(ws, { type: 'hello', playerId: socketPlayerId });
 
     ws.on('message', (raw) => {
         let data;
@@ -93,12 +94,16 @@ wss.on('connection', (ws) => {
         }
 
         if (data.type === 'create-room') {
-            roomId = handleCreateRoom(ws, playerId, data);
+            const result = handleCreateRoom(ws, playerId, data);
+            roomId = result.roomId;
+            playerId = result.playerId;
             return;
         }
 
         if (data.type === 'join-room') {
-            roomId = handleJoinRoom(ws, playerId, data);
+            const result = handleJoinRoom(ws, playerId, data);
+            roomId = result.roomId;
+            playerId = result.playerId;
             return;
         }
 
@@ -150,9 +155,12 @@ wss.on('connection', (ws) => {
         if (!room) return;
 
         const disconnected = room.players.find((player) => player.id === playerId);
-        room.players = room.players.filter((player) => !(player.id === playerId && !player.isBot));
+        if (disconnected && !disconnected.isBot) {
+            disconnected.ws = null;
+            disconnected.online = false;
+        }
 
-        if (!room.players.length) {
+        if (!room.players.some((player) => !player.isBot)) {
             rooms.delete(roomId);
             return;
         }
@@ -161,11 +169,12 @@ wss.on('connection', (ws) => {
             room.hostId = room.players[0]?.id || null;
         }
 
-        if (room.status === 'playing' && disconnected) {
-            disconnected.alive = false;
-            settleWinnerIfNeeded(room);
-            moveTurnToNextAlive(room, room.turn);
-            startTurnTimer(room);
+        if (room.status === 'playing' && disconnected && !disconnected.isBot) {
+            if (room.turn === disconnected.id) {
+                moveTurnToNextAlive(room, room.turn);
+                startTurnTimer(room);
+            }
+            addSystemChat(room, `⏸️ ${disconnected.nickname} временно отключен, его можно добить позже.`);
         }
 
         addSystemChat(room, `Игрок ${disconnected?.nickname || playerId.slice(0, 4)} отключился.`);
@@ -173,24 +182,25 @@ wss.on('connection', (ws) => {
     });
 });
 
-function handleCreateRoom(ws, playerId, data) {
+function handleCreateRoom(ws, fallbackPlayerId, data) {
     const roomName = String(data.room || '').trim();
+    const playerId = resolveClientId(data.clientId, fallbackPlayerId);
     const nickname = normalizeNickname(data.nickname, playerId);
     const maxPlayers = Number(data.maxPlayers);
 
     if (!roomName) {
         safeSend(ws, { type: 'error', message: 'Введите код комнаты' });
-        return null;
+        return { roomId: null, playerId };
     }
 
     if (rooms.has(roomName)) {
         safeSend(ws, { type: 'error', message: 'Комната уже существует' });
-        return null;
+        return { roomId: null, playerId };
     }
 
     if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > MAX_PLAYERS) {
         safeSend(ws, { type: 'error', message: 'Лимит игроков: от 2 до 4' });
-        return null;
+        return { roomId: null, playerId };
     }
 
     const room = {
@@ -210,38 +220,48 @@ function handleCreateRoom(ws, playerId, data) {
     rooms.set(roomName, room);
     addSystemChat(room, 'Комната создана. Ожидаем игроков.');
     broadcastRoomState(room, 'Комната создана. Ожидаем игроков.');
-    return roomName;
+    return { roomId: roomName, playerId };
 }
 
-function handleJoinRoom(ws, playerId, data) {
+function handleJoinRoom(ws, fallbackPlayerId, data) {
     const roomName = String(data.room || '').trim();
+    const playerId = resolveClientId(data.clientId, fallbackPlayerId);
     const nickname = normalizeNickname(data.nickname, playerId);
 
     if (!roomName) {
         safeSend(ws, { type: 'error', message: 'Введите код комнаты' });
-        return null;
+        return { roomId: null, playerId };
     }
 
     const room = rooms.get(roomName);
     if (!room) {
         safeSend(ws, { type: 'error', message: 'Комната не найдена' });
-        return null;
+        return { roomId: null, playerId };
+    }
+
+    const existing = room.players.find((player) => player.id === playerId && !player.isBot);
+    if (existing) {
+        existing.ws = ws;
+        existing.online = true;
+        addSystemChat(room, `${existing.nickname} переподключился к комнате.`);
+        broadcastRoomState(room, `${existing.nickname} переподключился.`);
+        return { roomId: roomName, playerId };
     }
 
     if (room.status !== 'waiting') {
         safeSend(ws, { type: 'error', message: 'Игра уже началась, подключение закрыто' });
-        return null;
+        return { roomId: null, playerId };
     }
 
     if (room.players.length >= room.maxPlayers) {
         safeSend(ws, { type: 'error', message: `Комната заполнена (${room.maxPlayers}/${room.maxPlayers})` });
-        return null;
+        return { roomId: null, playerId };
     }
 
     room.players.push(createPlayer(playerId, nickname, ws));
     addSystemChat(room, `${nickname} подключился к комнате.`);
     broadcastRoomState(room, `${nickname} подключился к комнате.`);
-    return roomName;
+    return { roomId: roomName, playerId };
 }
 
 function createPlayer(id, nickname, ws, isBot = false) {
@@ -250,6 +270,7 @@ function createPlayer(id, nickname, ws, isBot = false) {
         nickname,
         ws,
         isBot,
+        online: true,
         ready: false,
         alive: true,
         ships: [],
@@ -627,6 +648,7 @@ function broadcastRoomState(room, infoMessage = null) {
                 ready: player.ready,
                 alive: player.alive,
                 isBot: player.isBot,
+                online: player.isBot ? true : Boolean(player.online),
             })),
             yourShips: viewer.ships,
             yourHitsTaken: Array.from(viewer.hitsTaken).map(keyToPoint),
@@ -658,6 +680,13 @@ function normalizeNickname(nickname, fallbackId) {
     const cleaned = String(nickname || '').trim();
     if (!cleaned) return `Player-${fallbackId.slice(0, 4)}`;
     return cleaned.slice(0, 18);
+}
+
+function resolveClientId(clientId, fallbackId) {
+    const raw = String(clientId || '').trim();
+    if (!raw) return fallbackId;
+    if (!/^[a-zA-Z0-9_-]{6,40}$/.test(raw)) return fallbackId;
+    return raw;
 }
 
 function validateShips(ships) {

@@ -1,10 +1,13 @@
 const BOARD_SIZE = 10;
 const SHIP_SET = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
 const SETTINGS_KEY = 'battleshipSettings';
+const STATS_KEY = 'battleshipSessionStats';
 
 let ws = null;
 let pendingAction = null;
 let timerTick = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
 
 const state = {
     playerId: null,
@@ -27,8 +30,17 @@ const state = {
     events: [],
     manualOrientation: 'horizontal',
     selectedDockShipIndex: null,
+    clientId: '',
     achievements: [],
     achievementSet: new Set(),
+    hasSavedMatchStats: false,
+    sessionStats: {
+        matches: 0,
+        wins: 0,
+        shots: 0,
+        hits: 0,
+        shipsSunk: 0,
+    },
     settings: {
         serverUrl: 'ws://localhost:3000',
         nickname: '',
@@ -51,6 +63,7 @@ const createRoomBtn = el('createRoom');
 const joinRoomBtn = el('joinRoom');
 const addBotBtn = el('addBot');
 const autoPlaceBtn = el('autoPlace');
+const clearFleetBtn = el('clearFleet');
 const sendFleetBtn = el('sendFleet');
 const startGameBtn = el('startGame');
 const rematchBtn = el('rematch');
@@ -65,6 +78,7 @@ const timerMetaEl = el('timerMeta');
 const playersEl = el('players');
 const achievementsEl = el('achievements');
 const leaderboardEl = el('leaderboard');
+const sessionStatsEl = el('sessionStats');
 const eventsEl = el('events');
 const clearEventsBtn = el('clearEvents');
 const myBoardEl = el('myBoard');
@@ -87,6 +101,7 @@ randomRoomBtn.onclick = generateRoomCode;
 copyInviteBtn.onclick = copyInvite;
 addBotBtn.onclick = () => wsSend({ type: 'add-bot' });
 autoPlaceBtn.onclick = autoPlace;
+clearFleetBtn.onclick = clearFleet;
 sendFleetBtn.onclick = sendFleet;
 startGameBtn.onclick = startGame;
 rematchBtn.onclick = () => wsSend({ type: 'request-rematch' });
@@ -100,6 +115,10 @@ rotateShipBtn.onclick = () => {
     state.manualOrientation = state.manualOrientation === 'horizontal' ? 'vertical' : 'horizontal';
     rotateShipBtn.textContent = state.manualOrientation === 'horizontal' ? '↻ Горизонтально' : '↕ Вертикально';
 };
+window.addEventListener('keydown', (event) => {
+    if (event.key.toLowerCase() === 'r') rotateShipBtn.click();
+    if (event.key.toLowerCase() === 'a' && state.status === 'waiting') autoPlace();
+});
 
 soundToggleEl.onchange = () => { state.settings.soundEnabled = soundToggleEl.checked; persistSettings(); };
 manualModeEl.onchange = () => { state.settings.manualMode = manualModeEl.checked; persistSettings(); renderShipDock(); };
@@ -119,6 +138,7 @@ loadSettings();
 renderBoards();
 renderShipDock();
 renderTargetStats();
+renderSessionStats();
 
 function connect(action) {
     const room = roomEl.value.trim();
@@ -131,11 +151,13 @@ function connect(action) {
     if (ws && ws.readyState <= 1) ws.close();
 
     persistSettingsFromFields();
-    pendingAction = { type: action, room, nickname, maxPlayers: Number(maxPlayersEl.value) };
+    pendingAction = { type: action, room, nickname, maxPlayers: Number(maxPlayersEl.value), clientId: state.clientId };
 
     ws = new WebSocket(serverUrl);
 
     ws.onopen = () => {
+        reconnectAttempt = 0;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
         setStatus('Подключено к серверу. Отправляем запрос в комнату...');
         ws.send(JSON.stringify(pendingAction));
     };
@@ -148,7 +170,10 @@ function connect(action) {
         if (data.type === 'room-state') return applyRoomState(data);
     };
 
-    ws.onclose = () => setStatus('Отключено от сервера');
+    ws.onclose = () => {
+        setStatus('Отключено от сервера');
+        scheduleReconnect();
+    };
     ws.onerror = () => setStatus('Ошибка подключения');
 }
 
@@ -159,7 +184,17 @@ function wsSend(payload) {
 
 function reconnect() {
     if (!pendingAction) return setStatus('Нет данных для переподключения.');
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     connect(pendingAction.type);
+}
+
+function scheduleReconnect() {
+    if (!pendingAction || state.status === 'finished') return;
+    if (reconnectAttempt >= 5) return;
+    reconnectAttempt += 1;
+    const delay = Math.min(1000 * (2 ** (reconnectAttempt - 1)), 8000);
+    setStatus(`Переподключение через ${Math.round(delay / 1000)}с (попытка ${reconnectAttempt}/5)...`);
+    reconnectTimer = setTimeout(() => connect(pendingAction.type), delay);
 }
 
 async function detectServerUrl() {
@@ -195,10 +230,12 @@ function applyRoomState(data) {
     state.leaderboard = data.leaderboard || [];
     state.chat = data.chat || [];
     state.rematchVotes = data.rematchVotes || [];
+    if (state.status !== 'finished') state.hasSavedMatchStats = false;
 
     syncTargetSelect();
 
     autoPlaceBtn.disabled = state.status !== 'waiting';
+    clearFleetBtn.disabled = state.status !== 'waiting';
     sendFleetBtn.disabled = state.myShips.length !== SHIP_SET.length || state.status !== 'waiting';
 
     const isHost = state.playerId === state.hostId;
@@ -221,6 +258,7 @@ function applyRoomState(data) {
     renderTargetStats();
     renderChat();
     renderAchievements();
+    finalizeMatchStats();
     updateTimerMeta();
 }
 
@@ -247,9 +285,10 @@ function renderPlayers() {
         badge.innerHTML = `
             <strong>${player.nickname}</strong>
             <span>${short(player.id)}</span>
- <span>${player.id === state.hostId ? '👑 Хост' : player.isBot ? '🤖 Бот' : '👤 Игрок'}</span>
+            <span>${player.id === state.hostId ? '👑 Хост' : player.isBot ? '🤖 Бот' : '👤 Игрок'}</span>
             <span>${player.ready ? '✅ Готов' : '⌛ Расставляет флот'}</span>
             <span>${player.alive ? '🟢 В игре' : '⚫ Выбыл'}</span>
+            <span>${player.online === false ? '📴 Отключен' : '🟢 Онлайн'}</span>
         `;
         playersEl.appendChild(badge);
     });
@@ -287,6 +326,20 @@ function renderLeaderboard() {
         row.innerHTML = `<strong>#${entry.place}</strong><span>${entry.nickname}</span><span>🎯 ${entry.hits}</span><span>💥 ${entry.kills}</span><span>🚢 ${entry.shipsSunk}</span><span>⭐ ${entry.score}</span>`;
         leaderboardEl.appendChild(row);
     });
+}
+
+function renderSessionStats() {
+    const shots = state.sessionStats.shots;
+    const hits = state.sessionStats.hits;
+    const accuracy = shots ? Math.round((hits / shots) * 100) : 0;
+    sessionStatsEl.innerHTML = `
+        <span>Матчей: <strong>${state.sessionStats.matches}</strong></span>
+        <span>Побед: <strong>${state.sessionStats.wins}</strong></span>
+        <span>Выстрелов: <strong>${shots}</strong></span>
+        <span>Попаданий: <strong>${hits}</strong></span>
+        <span>Точность: <strong>${accuracy}%</strong></span>
+        <span>Потоплено: <strong>${state.sessionStats.shipsSunk}</strong></span>
+    `;
 }
 
 function renderEvents() {
@@ -441,6 +494,14 @@ function autoPlace() {
     renderShipDock();
 }
 
+function clearFleet() {
+    state.myShips = [];
+    state.selectedDockShipIndex = null;
+    renderBoards();
+    renderShipDock();
+    setStatus('Флот очищен. Можно расставить заново.');
+}
+
 function sendFleet() {
     if (!ws || ws.readyState !== 1) return alert('Сначала подключитесь к серверу');
     ws.send(JSON.stringify({ type: 'place-ships', ships: state.myShips }));
@@ -536,7 +597,15 @@ function attack(targetId, x, y, alreadyShot, cellEl) {
 }
 
 function isHintCell(x, y) {
-    return state.status === 'playing' && (x + y) % 2 === 0;
+    if (state.status !== 'playing') return false;
+    const selectedBoard = state.shotBoards[state.selectedTargetId] || { yourShots: [], hitsOnOpponent: [] };
+    const hits = new Set((selectedBoard.hitsOnOpponent || []).map((cell) => key(cell.x, cell.y)));
+    const shots = new Set((selectedBoard.yourShots || []).map((cell) => key(cell.x, cell.y)));
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nearby = key(x + dx, y + dy);
+        if (hits.has(nearby) && !shots.has(key(x, y))) return true;
+    }
+    return (x + y) % 2 === 0;
 }
 
 function key(x, y) { return `${x}:${y}`; }
@@ -589,6 +658,14 @@ function loadSettings() {
     } catch {
         // ignore
     }
+    state.clientId = localStorage.getItem('battleshipClientId') || `client-${Math.random().toString(36).slice(2, 12)}`;
+    localStorage.setItem('battleshipClientId', state.clientId);
+    try {
+        const statsRaw = localStorage.getItem(STATS_KEY);
+        if (statsRaw) state.sessionStats = { ...state.sessionStats, ...JSON.parse(statsRaw) };
+    } catch {
+        // ignore
+    }
 
     serverUrlEl.value = state.settings.serverUrl;
     nicknameEl.value = state.settings.nickname;
@@ -610,6 +687,10 @@ function persistSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
 }
 
+function persistSessionStats() {
+    localStorage.setItem(STATS_KEY, JSON.stringify(state.sessionStats));
+}
+
 function generateRoomCode() {
     const code = `room-${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 5)}`;
     roomEl.value = code;
@@ -628,6 +709,20 @@ async function copyInvite() {
     } catch {
         setStatus('Не удалось скопировать инвайт.');
     }
+}
+
+function finalizeMatchStats() {
+    if (state.status !== 'finished' || state.hasSavedMatchStats) return;
+    const me = state.leaderboard.find((entry) => entry.id === state.playerId);
+    if (!me) return;
+    state.hasSavedMatchStats = true;
+    state.sessionStats.matches += 1;
+    if (state.winner === state.playerId) state.sessionStats.wins += 1;
+    state.sessionStats.shots += (me.hits || 0) + (me.misses || 0);
+    state.sessionStats.hits += me.hits || 0;
+    state.sessionStats.shipsSunk += me.shipsSunk || 0;
+    persistSessionStats();
+    renderSessionStats();
 }
 
 function formatTime(date) {
