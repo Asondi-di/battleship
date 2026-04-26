@@ -9,7 +9,7 @@
 <div class="app">
     <header>
         <h1>Battleship Arena</h1>
-        <p>Тактический LAN-морской бой: до 4 игроков, рейтинг, журнал и умные подсказки.</p>
+        <p>Прокачанный LAN-морской бой: чат, боты, рематч, таймер хода и ручная drag&drop расстановка.</p>
     </header>
 
     <section class="panel">
@@ -44,19 +44,23 @@
         <div class="actions">
             <button id="createRoom">Создать комнату</button>
             <button id="joinRoom">Подключиться</button>
+            <button id="addBot" type="button">🤖 Добавить бота</button>
             <button id="autoPlace" disabled>Авторасстановка</button>
             <button id="sendFleet" disabled>Подтвердить флот</button>
             <button id="startGame" disabled>Запустить игру</button>
+            <button id="rematch" type="button">🔁 Рематч</button>
             <button id="reconnect" type="button">Переподключиться</button>
         </div>
 
         <div class="toggles">
             <label class="inline"><input id="soundToggle" type="checkbox" checked/> Звуки</label>
+            <label class="inline"><input id="manualMode" type="checkbox" checked/> Ручная расстановка</label>
         </div>
 
         <p id="status">Статус: не подключено</p>
         <p id="turnBanner" class="turn-banner">Ожидание подключения…</p>
         <p id="roomMeta">Комната: -</p>
+        <p id="timerMeta" class="timer-meta">Таймер хода: -</p>
 
         <div class="progress-cards">
             <div class="progress-card">
@@ -72,10 +76,26 @@
         </div>
 
         <div id="players" class="players"></div>
+
+        <div class="achievements-card">
+            <h3>Достижения</h3>
+            <div id="achievements" class="achievements"></div>
+        </div>
+
         <div class="leaderboard-card">
             <h3>Рейтинг матча</h3>
             <div id="leaderboard" class="leaderboard"></div>
         </div>
+
+        <div class="chat-card">
+            <h3>Чат комнаты</h3>
+            <div id="chatLog" class="chat-log"></div>
+            <div class="chat-row">
+                <input id="chatInput" placeholder="Сообщение в комнату..." maxlength="240"/>
+                <button id="sendChat" type="button">Отправить</button>
+            </div>
+        </div>
+
         <div class="events-card">
             <div class="title-row">
                 <h3>События</h3>
@@ -87,7 +107,11 @@
 
     <section class="battle-grid">
         <article class="board-card">
-            <h3>Ваше поле</h3>
+            <div class="target-row">
+                <h3>Ваше поле</h3>
+                <button id="rotateShip" type="button">↻ Повернуть корабль</button>
+            </div>
+            <div id="shipDock" class="ship-dock"></div>
             <div id="myBoard" class="board"></div>
         </article>
 

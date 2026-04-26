@@ -6,6 +6,7 @@ const PORT = process.env.PORT || 3000;
 const BOARD_SIZE = 10;
 const DEFAULT_SHIPS = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
 const MAX_PLAYERS = 4;
+const TURN_TIMEOUT_MS = 30000;
 
 const rooms = new Map();
 
@@ -50,6 +51,31 @@ const wss = new WebSocket.Server({ server });
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Battleship server started on http://0.0.0.0:${PORT}`);
 });
+
+setInterval(() => {
+    rooms.forEach((room) => {
+        if (room.status !== 'playing') return;
+        if (!room.turnDeadline || Date.now() < room.turnDeadline) return;
+
+        const attacker = room.players.find((player) => player.id === room.turn);
+        if (!attacker || !attacker.alive) {
+            moveTurnToNextAlive(room, room.turn);
+            startTurnTimer(room);
+            broadcastRoomState(room, 'Ход был пропущен из-за таймаута.');
+            return;
+        }
+
+        if (attacker.isBot) {
+            performBotMove(room, attacker, true);
+            return;
+        }
+
+        room.moveNumber += 1;
+        moveTurnToNextAlive(room, attacker.id);
+        startTurnTimer(room);
+        broadcastRoomState(room, `⏱️ ${attacker.nickname} не успел походить. Ход передан дальше.`);
+    });
+}, 1000);
 
 wss.on('connection', (ws) => {
     const playerId = Math.random().toString(36).slice(2, 10);
@@ -99,6 +125,21 @@ wss.on('connection', (ws) => {
 
         if (data.type === 'move') {
             handleMove(room, playerId, data.targetId, data.x, data.y);
+            return;
+        }
+
+        if (data.type === 'chat') {
+            handleChat(room, playerId, data.text);
+            return;
+        }
+
+        if (data.type === 'add-bot') {
+            handleAddBot(room, playerId);
+            return;
+        }
+
+        if (data.type === 'request-rematch') {
+            handleRematch(room, playerId);
         }
     });
 
@@ -109,24 +150,25 @@ wss.on('connection', (ws) => {
         if (!room) return;
 
         const disconnected = room.players.find((player) => player.id === playerId);
+        room.players = room.players.filter((player) => !(player.id === playerId && !player.isBot));
 
-        room.players = room.players.filter((player) => player.id !== playerId);
-
-        if (room.players.length === 0) {
+        if (!room.players.length) {
             rooms.delete(roomId);
             return;
         }
 
         if (room.hostId === playerId) {
-            room.hostId = room.players[0].id;
+            room.hostId = room.players[0]?.id || null;
         }
 
-        if (room.status === 'playing') {
-            if (disconnected) disconnected.alive = false;
+        if (room.status === 'playing' && disconnected) {
+            disconnected.alive = false;
             settleWinnerIfNeeded(room);
             moveTurnToNextAlive(room, room.turn);
+            startTurnTimer(room);
         }
 
+        addSystemChat(room, `Игрок ${disconnected?.nickname || playerId.slice(0, 4)} отключился.`);
         broadcastRoomState(room, `Игрок ${playerId.slice(0, 4)} отключился.`);
     });
 });
@@ -159,10 +201,14 @@ function handleCreateRoom(ws, playerId, data) {
         moveNumber: 0,
         maxPlayers,
         hostId: playerId,
+        rematchVotes: new Set(),
+        turnDeadline: null,
         players: [createPlayer(playerId, nickname, ws)],
+        chat: [],
     };
 
     rooms.set(roomName, room);
+    addSystemChat(room, 'Комната создана. Ожидаем игроков.');
     broadcastRoomState(room, 'Комната создана. Ожидаем игроков.');
     return roomName;
 }
@@ -193,15 +239,17 @@ function handleJoinRoom(ws, playerId, data) {
     }
 
     room.players.push(createPlayer(playerId, nickname, ws));
+    addSystemChat(room, `${nickname} подключился к комнате.`);
     broadcastRoomState(room, `${nickname} подключился к комнате.`);
     return roomName;
 }
 
-function createPlayer(id, nickname, ws) {
+function createPlayer(id, nickname, ws, isBot = false) {
     return {
         id,
         nickname,
         ws,
+        isBot,
         ready: false,
         alive: true,
         ships: [],
@@ -262,22 +310,21 @@ function handleStartGame(room, playerId) {
 
     room.status = 'playing';
     room.winner = null;
+    room.rematchVotes.clear();
     room.players.forEach((player) => {
         player.alive = true;
         player.hitsTaken = new Set();
         player.shotsByTarget = new Map();
         player.eliminatedAtMove = null;
-        player.stats = {
-            hits: 0,
-            misses: 0,
-            shipsSunk: 0,
-            kills: 0,
-        };
+        player.stats = { hits: 0, misses: 0, shipsSunk: 0, kills: 0 };
     });
     room.moveNumber = 0;
     room.turn = room.players[0].id;
+    startTurnTimer(room);
 
+    addSystemChat(room, 'Игра запущена создателем комнаты.');
     broadcastRoomState(room, 'Игра запущена создателем комнаты.');
+    triggerBotTurnIfNeeded(room);
 }
 
 function handleMove(room, playerId, targetId, x, y) {
@@ -285,47 +332,50 @@ function handleMove(room, playerId, targetId, x, y) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Игра не запущена' });
         return;
     }
-
     if (room.turn !== playerId) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Сейчас ход другого игрока' });
         return;
     }
+    executeMove(room, playerId, targetId, x, y);
+}
+
+function executeMove(room, playerId, targetId, x, y) {
 
     if (!isInsideBoard(x, y)) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Координаты вне поля' });
-        return;
+        return false;
     }
 
     const attacker = room.players.find((player) => player.id === playerId);
     const defender = room.players.find((player) => player.id === targetId);
 
-    if (!attacker || !defender) return;
+    if (!attacker || !defender) return false;
 
     if (!defender.alive) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Этот игрок уже выбыл' });
-        return;
+        return false;
     }
 
     if (attacker.id === defender.id) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Нельзя стрелять в себя' });
-        return;
+        return false;
     }
 
     const targetShots = attacker.shotsByTarget.get(defender.id) || new Set();
-    const key = pointKey(x, y);
+    const shotKey = pointKey(x, y);
 
-    if (targetShots.has(key)) {
+    if (targetShots.has(shotKey)) {
         safeSendToPlayer(room, playerId, { type: 'error', message: 'Вы уже стреляли в эту клетку выбранного поля' });
-        return;
+        return false;
     }
 
-    targetShots.add(key);
+    targetShots.add(shotKey);
     attacker.shotsByTarget.set(defender.id, targetShots);
     room.moveNumber += 1;
 
     const hit = isShipAt(defender.ships, x, y);
     if (hit) {
-        defender.hitsTaken.add(key);
+        defender.hitsTaken.add(shotKey);
         attacker.stats.hits += 1;
     } else {
         attacker.stats.misses += 1;
@@ -333,9 +383,7 @@ function handleMove(room, playerId, targetId, x, y) {
 
     const sunkShip = hit ? getShipSunkByShot(defender, x, y) : null;
     const shipSunk = Boolean(sunkShip);
-    if (shipSunk) {
-        attacker.stats.shipsSunk += 1;
-    }
+    if (shipSunk) attacker.stats.shipsSunk += 1;
 
     let defenderDefeated = false;
     if (defender.alive && areAllShipsSunk(defender)) {
@@ -349,6 +397,9 @@ function handleMove(room, playerId, targetId, x, y) {
 
     if (room.status === 'playing') {
         moveTurnToNextAlive(room, attacker.id);
+        startTurnTimer(room);
+    } else {
+        room.turnDeadline = null;
     }
 
     broadcast(room, {
@@ -364,6 +415,104 @@ function handleMove(room, playerId, targetId, x, y) {
     });
 
     broadcastRoomState(room);
+    triggerBotTurnIfNeeded(room);
+    return true;
+}
+
+function handleChat(room, playerId, text) {
+    const player = room.players.find((p) => p.id === playerId);
+    if (!player) return;
+
+    const clean = String(text || '').trim().slice(0, 240);
+    if (!clean) return;
+
+    room.chat.push({
+        id: Math.random().toString(36).slice(2, 9),
+        from: player.id,
+        nickname: player.nickname,
+        text: clean,
+        ts: Date.now(),
+    });
+    room.chat = room.chat.slice(-40);
+    broadcastRoomState(room);
+}
+
+function handleAddBot(room, playerId) {
+    if (room.hostId !== playerId) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Только хост может добавлять ботов' });
+        return;
+    }
+
+    if (room.status !== 'waiting') {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Ботов можно добавлять только до старта матча' });
+        return;
+    }
+
+    if (room.players.length >= room.maxPlayers) {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Комната уже заполнена' });
+        return;
+    }
+
+    const botId = `bot-${Math.random().toString(36).slice(2, 8)}`;
+    const botIndex = room.players.filter((p) => p.isBot).length + 1;
+    const bot = createPlayer(botId, `Bot-${botIndex}`, null, true);
+    bot.ships = generateFleet();
+    bot.ready = true;
+    room.players.push(bot);
+
+    addSystemChat(room, `${bot.nickname} присоединился к матчу.`);
+    broadcastRoomState(room, `${bot.nickname} добавлен в комнату.`);
+}
+
+function handleRematch(room, playerId) {
+    if (room.status !== 'finished') {
+        safeSendToPlayer(room, playerId, { type: 'error', message: 'Рематч доступен только после завершения игры' });
+        return;
+    }
+
+    room.rematchVotes.add(playerId);
+    const humans = room.players.filter((player) => !player.isBot);
+    const allHumansReady = humans.every((player) => room.rematchVotes.has(player.id));
+
+    if (!allHumansReady) {
+        broadcastRoomState(room, `Игрок ${playerId.slice(0, 4)} проголосовал за рематч (${room.rematchVotes.size}/${humans.length}).`);
+        return;
+    }
+
+    room.status = 'waiting';
+    room.turn = null;
+    room.winner = null;
+    room.moveNumber = 0;
+    room.turnDeadline = null;
+    room.rematchVotes.clear();
+
+    room.players.forEach((player) => {
+        player.ready = player.isBot;
+        player.alive = true;
+        player.hitsTaken = new Set();
+        player.shotsByTarget = new Map();
+        player.eliminatedAtMove = null;
+        player.stats = { hits: 0, misses: 0, shipsSunk: 0, kills: 0 };
+        if (player.isBot) {
+            player.ships = generateFleet();
+        } else {
+            player.ships = [];
+        }
+    });
+
+    addSystemChat(room, 'Все согласились на рематч. Подготовьте флот и запускайте новый бой!');
+    broadcastRoomState(room, 'Рематч запущен: снова этап расстановки.');
+}
+
+function addSystemChat(room, text) {
+    room.chat.push({
+        id: Math.random().toString(36).slice(2, 9),
+        from: 'system',
+        nickname: 'Система',
+        text,
+        ts: Date.now(),
+    });
+    room.chat = room.chat.slice(-40);
 }
 
 function settleWinnerIfNeeded(room) {
@@ -387,10 +536,64 @@ function moveTurnToNextAlive(room, currentPlayerId) {
     room.turn = alivePlayers[nextIndex].id;
 }
 
+function startTurnTimer(room) {
+    if (room.status !== 'playing' || !room.turn) {
+        room.turnDeadline = null;
+        return;
+    }
+
+    room.turnDeadline = Date.now() + TURN_TIMEOUT_MS;
+}
+
+function triggerBotTurnIfNeeded(room) {
+    if (room.status !== 'playing' || !room.turn) return;
+    const active = room.players.find((player) => player.id === room.turn);
+    if (!active || !active.isBot) return;
+
+    setTimeout(() => {
+        performBotMove(room, active);
+    }, 650 + Math.floor(Math.random() * 550));
+}
+
+function performBotMove(room, bot, byTimeout = false) {
+    if (room.status !== 'playing' || room.turn !== bot.id || !bot.alive) return;
+
+    const targets = room.players.filter((player) => player.id !== bot.id && player.alive);
+    if (!targets.length) return;
+
+    const target = targets[Math.floor(Math.random() * targets.length)];
+    const shots = bot.shotsByTarget.get(target.id) || new Set();
+
+    const options = [];
+    for (let y = 0; y < BOARD_SIZE; y += 1) {
+        for (let x = 0; x < BOARD_SIZE; x += 1) {
+            const candidate = pointKey(x, y);
+            if (!shots.has(candidate)) {
+                options.push({ x, y });
+            }
+        }
+    }
+
+    if (!options.length) {
+        moveTurnToNextAlive(room, bot.id);
+        startTurnTimer(room);
+        broadcastRoomState(room, `${bot.nickname} пропустил ход (нет доступных клеток).`);
+        return;
+    }
+
+    const choice = options[Math.floor(Math.random() * options.length)];
+    if (byTimeout) {
+        addSystemChat(room, `⏱️ ${bot.nickname} ходит по таймеру.`);
+    }
+    executeMove(room, bot.id, target.id, choice.x, choice.y);
+}
+
 function broadcastRoomState(room, infoMessage = null) {
     const leaderboard = buildLeaderboard(room);
 
     room.players.forEach((viewer) => {
+        if (viewer.isBot) return;
+
         const opponents = room.players.filter((player) => player.id !== viewer.id);
         const shotBoards = {};
 
@@ -416,17 +619,22 @@ function broadcastRoomState(room, infoMessage = null) {
             hostId: room.hostId,
             maxPlayers: room.maxPlayers,
             moveNumber: room.moveNumber,
+            turnDeadline: room.turnDeadline,
             you: viewer.id,
             players: room.players.map((player) => ({
                 id: player.id,
                 nickname: player.nickname,
                 ready: player.ready,
                 alive: player.alive,
+                isBot: player.isBot,
             })),
             yourShips: viewer.ships,
             yourHitsTaken: Array.from(viewer.hitsTaken).map(keyToPoint),
             shotBoards,
             leaderboard,
+            chat: room.chat,
+            rematchVotes: Array.from(room.rematchVotes),
+            turnTimeoutMs: TURN_TIMEOUT_MS,
         });
     });
 }
@@ -437,11 +645,11 @@ function broadcast(room, payload) {
 
 function safeSendToPlayer(room, playerId, payload) {
     const player = room.players.find((candidate) => candidate.id === playerId);
-    if (player) safeSend(player.ws, payload);
+    if (player && !player.isBot) safeSend(player.ws, payload);
 }
 
 function safeSend(ws, payload) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(payload));
     }
 }
@@ -481,7 +689,7 @@ function validateShips(ships) {
 
         const sorted = [...ship.cells].sort((a, b) => (sameX ? a.y - b.y : a.x - b.x));
 
-        for (let i = 0; i < sorted.length; i++) {
+        for (let i = 0; i < sorted.length; i += 1) {
             const cell = sorted[i];
             if (!isInsideBoard(cell.x, cell.y)) {
                 return { ok: false, message: 'Корабль выходит за границы поля' };
@@ -595,6 +803,59 @@ function pointKey(x, y) {
 function keyToPoint(key) {
     const [x, y] = key.split(':').map(Number);
     return { x, y };
+}
+
+function generateFleet() {
+    const board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(0));
+    const ships = [];
+
+    for (const size of DEFAULT_SHIPS) {
+        let placed = false;
+        let attempts = 0;
+
+        while (!placed && attempts < 2000) {
+            attempts += 1;
+            const horizontal = Math.random() < 0.5;
+            const startX = Math.floor(Math.random() * BOARD_SIZE);
+            const startY = Math.floor(Math.random() * BOARD_SIZE);
+
+            const cells = [];
+            for (let i = 0; i < size; i += 1) {
+                const x = startX + (horizontal ? i : 0);
+                const y = startY + (horizontal ? 0 : i);
+                if (x >= BOARD_SIZE || y >= BOARD_SIZE) {
+                    cells.length = 0;
+                    break;
+                }
+                cells.push({ x, y });
+            }
+
+            if (!cells.length || !canPlaceShip(board, cells)) continue;
+            cells.forEach((cell) => {
+                board[cell.y][cell.x] = 1;
+            });
+            ships.push({ cells });
+            placed = true;
+        }
+
+        if (!placed) return generateFleet();
+    }
+
+    return ships;
+}
+
+function canPlaceShip(board, cells) {
+    for (const cell of cells) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+                const nx = cell.x + dx;
+                const ny = cell.y + dy;
+                if (nx < 0 || ny < 0 || nx >= BOARD_SIZE || ny >= BOARD_SIZE) continue;
+                if (board[ny][nx] === 1) return false;
+            }
+        }
+    }
+    return true;
 }
 
 function getLanIPv4Addresses() {

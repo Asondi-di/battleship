@@ -4,6 +4,7 @@ const SETTINGS_KEY = 'battleshipSettings';
 
 let ws = null;
 let pendingAction = null;
+let timerTick = null;
 
 const state = {
     playerId: null,
@@ -12,70 +13,96 @@ const state = {
     maxPlayers: 4,
     status: 'waiting',
     turn: null,
+    turnDeadline: null,
+    turnTimeoutMs: 30000,
     winner: null,
     players: [],
     myShips: [],
     myHitsTaken: [],
     shotBoards: {},
+    chat: [],
+    rematchVotes: [],
     selectedTargetId: '',
     leaderboard: [],
     events: [],
+    manualOrientation: 'horizontal',
+    selectedDockShipIndex: null,
+    achievements: [],
+    achievementSet: new Set(),
     settings: {
         serverUrl: 'ws://localhost:3000',
         nickname: '',
         room: '',
         maxPlayers: '4',
         soundEnabled: true,
+        manualMode: true,
     },
 };
 
-const serverUrlEl = document.getElementById('serverUrl');
-const detectServerUrlBtn = document.getElementById('detectServerUrl');
-const nicknameEl = document.getElementById('nickname');
-const roomEl = document.getElementById('room');
-const randomRoomBtn = document.getElementById('randomRoom');
-const copyInviteBtn = document.getElementById('copyInvite');
-const maxPlayersEl = document.getElementById('maxPlayers');
-const createRoomBtn = document.getElementById('createRoom');
-const joinRoomBtn = document.getElementById('joinRoom');
-const reconnectBtn = document.getElementById('reconnect');
-const autoPlaceBtn = document.getElementById('autoPlace');
-const sendFleetBtn = document.getElementById('sendFleet');
-const startGameBtn = document.getElementById('startGame');
-const soundToggleEl = document.getElementById('soundToggle');
-const statusEl = document.getElementById('status');
-const turnBannerEl = document.getElementById('turnBanner');
-const roomMetaEl = document.getElementById('roomMeta');
-const playersEl = document.getElementById('players');
-const leaderboardEl = document.getElementById('leaderboard');
-const eventsEl = document.getElementById('events');
-const clearEventsBtn = document.getElementById('clearEvents');
-const myBoardEl = document.getElementById('myBoard');
-const enemyBoardEl = document.getElementById('enemyBoard');
-const targetSelectEl = document.getElementById('targetSelect');
-const targetStatsEl = document.getElementById('targetStats');
-const lobbyProgressEl = document.getElementById('lobbyProgress');
-const lobbyProgressBarEl = document.getElementById('lobbyProgressBar');
-const myProgressEl = document.getElementById('myProgress');
-const myProgressBarEl = document.getElementById('myProgressBar');
+const el = (id) => document.getElementById(id);
+const serverUrlEl = el('serverUrl');
+const detectServerUrlBtn = el('detectServerUrl');
+const nicknameEl = el('nickname');
+const roomEl = el('room');
+const randomRoomBtn = el('randomRoom');
+const copyInviteBtn = el('copyInvite');
+const maxPlayersEl = el('maxPlayers');
+const createRoomBtn = el('createRoom');
+const joinRoomBtn = el('joinRoom');
+const addBotBtn = el('addBot');
+const autoPlaceBtn = el('autoPlace');
+const sendFleetBtn = el('sendFleet');
+const startGameBtn = el('startGame');
+const rematchBtn = el('rematch');
+const reconnectBtn = el('reconnect');
+const soundToggleEl = el('soundToggle');
+const manualModeEl = el('manualMode');
+const rotateShipBtn = el('rotateShip');
+const statusEl = el('status');
+const turnBannerEl = el('turnBanner');
+const roomMetaEl = el('roomMeta');
+const timerMetaEl = el('timerMeta');
+const playersEl = el('players');
+const achievementsEl = el('achievements');
+const leaderboardEl = el('leaderboard');
+const eventsEl = el('events');
+const clearEventsBtn = el('clearEvents');
+const myBoardEl = el('myBoard');
+const enemyBoardEl = el('enemyBoard');
+const shipDockEl = el('shipDock');
+const targetSelectEl = el('targetSelect');
+const targetStatsEl = el('targetStats');
+const lobbyProgressEl = el('lobbyProgress');
+const lobbyProgressBarEl = el('lobbyProgressBar');
+const myProgressEl = el('myProgress');
+const myProgressBarEl = el('myProgressBar');
+const chatLogEl = el('chatLog');
+const chatInputEl = el('chatInput');
+const sendChatBtn = el('sendChat');
 
 createRoomBtn.onclick = () => connect('create-room');
 joinRoomBtn.onclick = () => connect('join-room');
 detectServerUrlBtn.onclick = detectServerUrl;
 randomRoomBtn.onclick = generateRoomCode;
 copyInviteBtn.onclick = copyInvite;
+addBotBtn.onclick = () => wsSend({ type: 'add-bot' });
 autoPlaceBtn.onclick = autoPlace;
 sendFleetBtn.onclick = sendFleet;
 startGameBtn.onclick = startGame;
+rematchBtn.onclick = () => wsSend({ type: 'request-rematch' });
 reconnectBtn.onclick = reconnect;
-clearEventsBtn.onclick = () => {
-    state.events = [];
-    renderEvents();
+clearEventsBtn.onclick = () => { state.events = []; renderEvents(); };
+sendChatBtn.onclick = sendChat;
+chatInputEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') sendChat();
+});
+rotateShipBtn.onclick = () => {
+    state.manualOrientation = state.manualOrientation === 'horizontal' ? 'vertical' : 'horizontal';
+    rotateShipBtn.textContent = state.manualOrientation === 'horizontal' ? '↻ Горизонтально' : '↕ Вертикально';
 };
-soundToggleEl.onchange = () => {
-    state.settings.soundEnabled = soundToggleEl.checked;
-    persistSettings();
-};
+
+soundToggleEl.onchange = () => { state.settings.soundEnabled = soundToggleEl.checked; persistSettings(); };
+manualModeEl.onchange = () => { state.settings.manualMode = manualModeEl.checked; persistSettings(); renderShipDock(); };
 
 [serverUrlEl, nicknameEl, roomEl, maxPlayersEl].forEach((element) => {
     element.addEventListener('change', persistSettingsFromFields);
@@ -90,6 +117,7 @@ targetSelectEl.onchange = () => {
 
 loadSettings();
 renderBoards();
+renderShipDock();
 renderTargetStats();
 
 function connect(action) {
@@ -97,28 +125,13 @@ function connect(action) {
     const serverUrl = serverUrlEl.value.trim();
     const nickname = nicknameEl.value.trim();
 
-    if (!room) {
-        alert('Введите код комнаты');
-        return;
-    }
+    if (!room) return alert('Введите код комнаты');
+    if (!serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) return alert('Некорректный URL WebSocket');
 
-    if (!serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) {
-        alert('Некорректный URL WebSocket');
-        return;
-    }
-
-    if (ws && ws.readyState <= 1) {
-        ws.close();
-    }
+    if (ws && ws.readyState <= 1) ws.close();
 
     persistSettingsFromFields();
-
-    pendingAction = {
-        type: action,
-        room,
-        nickname,
-        maxPlayers: Number(maxPlayersEl.value),
-    };
+    pendingAction = { type: action, room, nickname, maxPlayers: Number(maxPlayersEl.value) };
 
     ws = new WebSocket(serverUrl);
 
@@ -129,61 +142,38 @@ function connect(action) {
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-
-        if (data.type === 'hello') {
-            state.playerId = data.playerId;
-            return;
-        }
-
-        if (data.type === 'error') {
-            alert(data.message);
-            return;
-        }
-
-        if (data.type === 'move-result') {
-            handleMoveResult(data);
-            return;
-        }
-
-        if (data.type === 'room-state') {
-            applyRoomState(data);
-        }
+        if (data.type === 'hello') return void (state.playerId = data.playerId);
+        if (data.type === 'error') return alert(data.message);
+        if (data.type === 'move-result') return handleMoveResult(data);
+        if (data.type === 'room-state') return applyRoomState(data);
     };
 
     ws.onclose = () => setStatus('Отключено от сервера');
     ws.onerror = () => setStatus('Ошибка подключения');
 }
 
+function wsSend(payload) {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify(payload));
+}
+
 function reconnect() {
-    if (!pendingAction) {
-        setStatus('Нет данных для переподключения. Создайте или подключитесь к комнате.');
-        return;
-    }
+    if (!pendingAction) return setStatus('Нет данных для переподключения.');
     connect(pendingAction.type);
 }
 
 async function detectServerUrl() {
     detectServerUrlBtn.disabled = true;
-
     try {
         const response = await fetch('http://localhost:3000/network-info');
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
         const data = await response.json();
         const url = Array.isArray(data.wsUrls) && data.wsUrls.length ? data.wsUrls[0] : '';
-
-        if (!url) {
-            alert('Не удалось определить адрес. Проверьте, что сервер запущен на этом ПК.');
-            return;
-        }
-
+        if (!url) return alert('Не удалось определить адрес.');
         serverUrlEl.value = url;
         persistSettingsFromFields();
         setStatus(`Автоподстановка: ${url}`);
     } catch {
-        alert('Не удалось получить IP хоста. Запустите сервер (npm start) на этом ПК или введите адрес вручную.');
+        alert('Не удалось получить IP хоста. Запустите сервер (npm start).');
     } finally {
         detectServerUrlBtn.disabled = false;
     }
@@ -196,11 +186,15 @@ function applyRoomState(data) {
     state.status = data.status;
     state.turn = data.turn;
     state.winner = data.winner;
+    state.turnDeadline = data.turnDeadline;
+    state.turnTimeoutMs = data.turnTimeoutMs || 30000;
     state.players = data.players || [];
     state.myShips = data.yourShips || [];
     state.myHitsTaken = data.yourHitsTaken || [];
     state.shotBoards = data.shotBoards || {};
     state.leaderboard = data.leaderboard || [];
+    state.chat = data.chat || [];
+    state.rematchVotes = data.rematchVotes || [];
 
     syncTargetSelect();
 
@@ -211,26 +205,37 @@ function applyRoomState(data) {
     const everyoneJoined = state.players.length === state.maxPlayers;
     const everyoneReady = state.players.length > 0 && state.players.every((player) => player.ready);
     startGameBtn.disabled = !(isHost && state.status === 'waiting' && everyoneJoined && everyoneReady);
+    addBotBtn.disabled = !(isHost && state.status === 'waiting' && state.players.length < state.maxPlayers);
 
-    roomMetaEl.textContent = `Комната: ${state.roomId} | Хост: ${short(state.hostId)} | Игроки: ${state.players.length}/${state.maxPlayers}`;
+    roomMetaEl.textContent = `Комната: ${state.roomId} | Хост: ${playerName(state.hostId)} | Игроки: ${state.players.length}/${state.maxPlayers}`;
+
+    if (data.infoMessage) setStatus(data.infoMessage);
+
     renderPlayers();
-
-    if (data.infoMessage) {
-        setStatus(data.infoMessage);
-    } else if (state.status === 'waiting') {
-        setStatus('Ожидание игроков, расстановки и запуска от хоста.');
-    } else if (state.status === 'playing') {
-        setStatus(state.turn === state.playerId ? 'Ваш ход. Выберите цель и стреляйте.' : `Ход игрока ${short(state.turn)}`);
-    } else if (state.status === 'finished') {
-        setStatus(state.winner === state.playerId ? 'Победа! 🎉' : `Победил ${short(state.winner)}`);
-    }
-
     renderBoards();
+    renderShipDock();
     renderTurnBanner();
     renderLeaderboard();
     renderEvents();
     renderProgress();
     renderTargetStats();
+    renderChat();
+    renderAchievements();
+    updateTimerMeta();
+}
+
+function updateTimerMeta() {
+    if (timerTick) clearInterval(timerTick);
+    const tick = () => {
+        if (state.status !== 'playing' || !state.turnDeadline) {
+            timerMetaEl.textContent = 'Таймер хода: -';
+            return;
+        }
+        const left = Math.max(0, Math.ceil((state.turnDeadline - Date.now()) / 1000));
+        timerMetaEl.textContent = `Таймер хода: ${left}s (${playerName(state.turn)})`;
+    };
+    tick();
+    timerTick = setInterval(tick, 500);
 }
 
 function renderPlayers() {
@@ -238,13 +243,11 @@ function renderPlayers() {
     state.players.forEach((player) => {
         const badge = document.createElement('div');
         badge.className = 'player-badge';
-        if (state.status === 'playing' && player.id === state.turn) {
-            badge.classList.add('turn');
-        }
+        if (state.status === 'playing' && player.id === state.turn) badge.classList.add('turn');
         badge.innerHTML = `
             <strong>${player.nickname}</strong>
             <span>${short(player.id)}</span>
-            <span>${player.id === state.hostId ? '👑 Хост' : '👤 Игрок'}</span>
+ <span>${player.id === state.hostId ? '👑 Хост' : player.isBot ? '🤖 Бот' : '👤 Игрок'}</span>
             <span>${player.ready ? '✅ Готов' : '⌛ Расставляет флот'}</span>
             <span>${player.alive ? '🟢 В игре' : '⚫ Выбыл'}</span>
         `;
@@ -254,71 +257,41 @@ function renderPlayers() {
 
 function renderTurnBanner() {
     turnBannerEl.className = 'turn-banner';
-
-    if (state.status === 'waiting') {
-        turnBannerEl.textContent = 'Подготовка к бою: расставьте флот и ждите запуск от хоста.';
-        return;
-    }
+    if (state.status === 'waiting') return void (turnBannerEl.textContent = 'Подготовка к бою: расставьте флот и ждите запуск от хоста.');
 
     if (state.status === 'playing') {
         if (state.turn === state.playerId) {
-            turnBannerEl.textContent = '🔥 СЕЙЧАС ВАШ ХОД! Выберите живого противника и нанесите удар.';
+            turnBannerEl.textContent = '🔥 ВАШ ХОД!';
             turnBannerEl.classList.add('my-turn');
             playSound('turn');
             return;
         }
-
-        const active = state.players.find((player) => player.id === state.turn);
-        turnBannerEl.textContent = `⌛ Ход игрока: ${active ? active.nickname : short(state.turn)}.`;
-        return;
+        return void (turnBannerEl.textContent = `⌛ Ход игрока: ${playerName(state.turn)}.`);
     }
 
     if (state.status === 'finished') {
-        const winner = state.players.find((player) => player.id === state.winner);
-        turnBannerEl.textContent = winner && winner.id === state.playerId
-            ? '🏆 МАТЧ ОКОНЧЕН: ВЫ ПОБЕДИЛИ!'
-            : `🏁 Матч окончен. Победитель: ${winner ? winner.nickname : short(state.winner)}.`;
+        turnBannerEl.textContent = state.winner === state.playerId ? '🏆 МАТЧ ОКОНЧЕН: ВЫ ПОБЕДИЛИ!' : `🏁 Победитель: ${playerName(state.winner)}.`;
         turnBannerEl.classList.add('finished');
+        unlockAchievement(state.winner === state.playerId ? 'Победитель' : 'До реванша');
         playSound('finish');
-        return;
     }
-
-    turnBannerEl.textContent = 'Игра не активна.';
 }
 
 function renderLeaderboard() {
     leaderboardEl.innerHTML = '';
-    if (!state.leaderboard.length) {
-        leaderboardEl.textContent = 'Рейтинг появится после старта матча.';
-        return;
-    }
-
+    if (!state.leaderboard.length) return void (leaderboardEl.textContent = 'Рейтинг появится после старта матча.');
     state.leaderboard.forEach((entry) => {
         const row = document.createElement('div');
         row.className = 'leaderboard-item';
-        if (entry.id === state.playerId) {
-            row.classList.add('me');
-        }
-
-        row.innerHTML = `
-            <strong>#${entry.place}</strong>
-            <span>${entry.nickname}</span>
-            <span>🎯 ${entry.hits}</span>
-            <span>💥 ${entry.kills}</span>
-            <span>🚢 ${entry.shipsSunk}</span>
-            <span>⭐ ${entry.score}</span>
-        `;
+        if (entry.id === state.playerId) row.classList.add('me');
+        row.innerHTML = `<strong>#${entry.place}</strong><span>${entry.nickname}</span><span>🎯 ${entry.hits}</span><span>💥 ${entry.kills}</span><span>🚢 ${entry.shipsSunk}</span><span>⭐ ${entry.score}</span>`;
         leaderboardEl.appendChild(row);
     });
 }
 
 function renderEvents() {
     eventsEl.innerHTML = '';
-    if (!state.events.length) {
-        eventsEl.textContent = 'Лента событий пуста.';
-        return;
-    }
-
+    if (!state.events.length) return void (eventsEl.textContent = 'Лента событий пуста.');
     state.events.slice(-8).reverse().forEach((message) => {
         const eventEl = document.createElement('div');
         eventEl.className = 'event-item';
@@ -339,26 +312,22 @@ function renderProgress() {
     const accuracy = shots ? Math.round((mine.hits / shots) * 100) : 0;
     myProgressEl.textContent = `Попаданий: ${mine?.hits || 0} · Точность: ${accuracy}%`;
     myProgressBarEl.style.width = `${accuracy}%`;
+
+    if (shots >= 10 && accuracy >= 70) unlockAchievement('Снайпер');
 }
 
 function renderTargetStats() {
-    if (!state.selectedTargetId) {
-        targetStatsEl.textContent = 'Нет живых противников.';
-        return;
-    }
-
+    if (!state.selectedTargetId) return void (targetStatsEl.textContent = 'Нет живых противников.');
     const target = state.players.find((player) => player.id === state.selectedTargetId);
     const board = state.shotBoards[state.selectedTargetId] || { yourShots: [], hitsOnOpponent: [] };
     const shots = board.yourShots.length;
     const hits = board.hitsOnOpponent.length;
     const accuracy = shots ? Math.round((hits / shots) * 100) : 0;
-
     targetStatsEl.textContent = `По цели ${target ? target.nickname : short(state.selectedTargetId)}: выстрелов ${shots}, попаданий ${hits}, точность ${accuracy}%.`;
 }
 
 function syncTargetSelect() {
     const aliveOpponents = state.players.filter((player) => player.id !== state.playerId && player.alive);
-
     targetSelectEl.innerHTML = '';
     aliveOpponents.forEach((player) => {
         const option = document.createElement('option');
@@ -366,17 +335,53 @@ function syncTargetSelect() {
         option.textContent = `${player.nickname} (${short(player.id)})`;
         targetSelectEl.appendChild(option);
     });
+    if (!aliveOpponents.length) return void (state.selectedTargetId = '');
+    if (!aliveOpponents.some((player) => player.id === state.selectedTargetId)) state.selectedTargetId = aliveOpponents[0].id;
+    targetSelectEl.value = state.selectedTargetId;
+}
 
-    if (!aliveOpponents.length) {
-        state.selectedTargetId = '';
+function renderChat() {
+    chatLogEl.innerHTML = '';
+    state.chat.slice(-30).forEach((line) => {
+        const row = document.createElement('div');
+        row.className = 'chat-item';
+        row.innerHTML = `<strong>${line.nickname}:</strong> ${escapeHtml(line.text)}`;
+        chatLogEl.appendChild(row);
+    });
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
+}
+
+function sendChat() {
+    const text = chatInputEl.value.trim();
+    if (!text) return;
+    wsSend({ type: 'chat', text });
+    chatInputEl.value = '';
+}
+
+function renderShipDock() {
+    shipDockEl.innerHTML = '';
+    if (!state.settings.manualMode || state.status !== 'waiting') {
+        shipDockEl.textContent = 'Ручная расстановка отключена. Используйте авторасстановку или включите ручной режим.';
         return;
     }
 
-    if (!aliveOpponents.some((player) => player.id === state.selectedTargetId)) {
-        state.selectedTargetId = aliveOpponents[0].id;
-    }
-
-    targetSelectEl.value = state.selectedTargetId;
+    const placed = state.myShips.map((ship) => ship.cells.length);
+    SHIP_SET.forEach((size, index) => {
+        const usedIdx = placed.indexOf(size);
+        if (usedIdx !== -1) placed[usedIdx] = -1;
+        const token = document.createElement('button');
+        token.className = 'dock-ship';
+        token.draggable = usedIdx === -1;
+        token.textContent = `${size}⚓`;
+        if (usedIdx !== -1) token.classList.add('placed');
+        if (state.selectedDockShipIndex === index) token.classList.add('selected');
+        token.onclick = () => { state.selectedDockShipIndex = index; renderShipDock(); };
+        token.ondragstart = (event) => {
+            state.selectedDockShipIndex = index;
+            event.dataTransfer?.setData('text/plain', String(index));
+        };
+        shipDockEl.appendChild(token);
+    });
 }
 
 function setStatus(text) {
@@ -387,71 +392,62 @@ function handleMoveResult(data) {
     const attacker = playerName(data.from);
     const defender = playerName(data.to);
     const coord = `${data.target?.x + 1}:${data.target?.y + 1}`;
-    const shotResult = data.hit ? 'попадание' : 'мимо';
-    let message = `${formatTime(new Date())} 🎯 ${attacker} → ${defender} (${coord}): ${shotResult}.`;
-
-    if (data.shipSunk) {
-        message += ` Корабль ${defender} уничтожен!`;
-    }
-    if (data.defenderDefeated) {
-        message += ` Игрок ${defender} выбыл из матча.`;
-    }
-    if (data.winner) {
-        message += ` Победитель: ${playerName(data.winner)}.`;
-    }
-
+    let message = `${formatTime(new Date())} 🎯 ${attacker} → ${defender} (${coord}): ${data.hit ? 'попадание' : 'мимо'}.`;
+    if (data.shipSunk) message += ` Корабль ${defender} уничтожен!`;
+    if (data.defenderDefeated) message += ` Игрок ${defender} выбыл.`;
+    if (data.winner) message += ` Победитель: ${playerName(data.winner)}.`;
     pushEvent(message);
 
-    if (data.hit) {
-        playSound('hit');
-    } else {
-        playSound('miss');
-    }
+    if (data.from === state.playerId && data.hit) unlockAchievement('Первое попадание');
+    if (data.from === state.playerId && data.shipSunk) unlockAchievement('Кораблекрушитель');
+    if (data.to === state.playerId && !data.hit) unlockAchievement('Маневрист');
 
-    if (data.to === state.playerId && data.hit) {
-        setStatus(`По вашему флоту попал ${attacker} (${coord}).`);
-    } else if (data.from === state.playerId) {
-        if (data.hit) {
-            setStatus(data.shipSunk ? `Отличный выстрел: корабль ${defender} потоплен.` : `Есть попадание по ${defender}.`);
-        } else {
-            setStatus(`Вы промахнулись по ${defender}.`);
-        }
-    }
+    playSound(data.hit ? 'hit' : 'miss');
 }
 
 function pushEvent(message) {
     state.events.push(message);
-    if (state.events.length > 40) {
-        state.events = state.events.slice(-40);
-    }
+    if (state.events.length > 40) state.events = state.events.slice(-40);
     renderEvents();
 }
 
+function unlockAchievement(name) {
+    if (state.achievementSet.has(name)) return;
+    state.achievementSet.add(name);
+    state.achievements.push({ name, at: Date.now() });
+    renderAchievements();
+    pushEvent(`${formatTime(new Date())} 🏅 Достижение: ${name}`);
+}
+
+function renderAchievements() {
+    achievementsEl.innerHTML = '';
+    if (!state.achievements.length) return void (achievementsEl.textContent = 'Пока нет достижений.');
+    state.achievements.slice(-6).reverse().forEach((item) => {
+        const badge = document.createElement('span');
+        badge.className = 'achievement';
+        badge.textContent = `🏅 ${item.name}`;
+        achievementsEl.appendChild(badge);
+    });
+}
+
 function playerName(id) {
-    const player = state.players.find((candidate) => candidate.id === id);
-    return player ? player.nickname : short(id);
+    return state.players.find((candidate) => candidate.id === id)?.nickname || short(id);
 }
 
 function autoPlace() {
     state.myShips = generateFleet();
     pushEvent(`${formatTime(new Date())} ⚙️ Ваш флот автоматически расставлен.`);
+    renderBoards();
+    renderShipDock();
 }
 
 function sendFleet() {
-    if (!ws || ws.readyState !== 1) {
-        alert('Сначала подключитесь к серверу');
-        return;
-    }
-
+    if (!ws || ws.readyState !== 1) return alert('Сначала подключитесь к серверу');
     ws.send(JSON.stringify({ type: 'place-ships', ships: state.myShips }));
 }
 
 function startGame() {
-    if (!ws || ws.readyState !== 1) {
-        alert('Нет подключения к серверу');
-        return;
-    }
-
+    if (!ws || ws.readyState !== 1) return alert('Нет подключения к серверу');
     ws.send(JSON.stringify({ type: 'start-game' }));
 }
 
@@ -466,123 +462,132 @@ function renderBoards() {
     const yourShotKeys = new Set((selectedBoard.yourShots || []).map((cell) => key(cell.x, cell.y)));
     const hitOnOpponentKeys = new Set((selectedBoard.hitsOnOpponent || []).map((cell) => key(cell.x, cell.y)));
 
-    for (let y = 0; y < BOARD_SIZE; y++) {
-        for (let x = 0; x < BOARD_SIZE; x++) {
+    for (let y = 0; y < BOARD_SIZE; y += 1) {
+        for (let x = 0; x < BOARD_SIZE; x += 1) {
             const coordinate = key(x, y);
-
             const myCell = document.createElement('button');
             myCell.className = 'cell';
+            myCell.dataset.label = `${x + 1}:${y + 1}`;
             if (myShipKeys.has(coordinate)) myCell.classList.add('ship');
             if (myHitKeys.has(coordinate)) myCell.classList.add('hit');
             if (myHitKeys.has(coordinate) && !myShipKeys.has(coordinate)) myCell.classList.add('miss');
-            myCell.disabled = true;
+            if (state.status === 'waiting' && state.settings.manualMode) {
+                myCell.onclick = () => tryPlaceManualShip(x, y);
+                myCell.ondragover = (e) => e.preventDefault();
+                myCell.ondrop = (e) => {
+                    e.preventDefault();
+                    const idx = Number(e.dataTransfer?.getData('text/plain'));
+                    state.selectedDockShipIndex = Number.isInteger(idx) ? idx : state.selectedDockShipIndex;
+                    tryPlaceManualShip(x, y);
+                };
+            } else {
+                myCell.disabled = true;
+            }
             myBoardEl.appendChild(myCell);
 
             const enemyCell = document.createElement('button');
             enemyCell.className = 'cell enemy';
             enemyCell.dataset.label = `${x + 1}:${y + 1}`;
-            if (yourShotKeys.has(coordinate) && hitOnOpponentKeys.has(coordinate)) {
-                enemyCell.classList.add('hit');
-            } else if (yourShotKeys.has(coordinate)) {
-                enemyCell.classList.add('miss');
-            } else if (isHintCell(x, y)) {
-                enemyCell.classList.add('hint');
-            }
-
-            enemyCell.onclick = () => attack(state.selectedTargetId, x, y, yourShotKeys.has(coordinate));
+            if (yourShotKeys.has(coordinate) && hitOnOpponentKeys.has(coordinate)) enemyCell.classList.add('hit');
+            else if (yourShotKeys.has(coordinate)) enemyCell.classList.add('miss');
+            else if (isHintCell(x, y)) enemyCell.classList.add('hint');
+            enemyCell.onclick = () => attack(state.selectedTargetId, x, y, yourShotKeys.has(coordinate), enemyCell);
             enemyBoardEl.appendChild(enemyCell);
         }
     }
 }
 
-function attack(targetId, x, y, alreadyShot) {
-    if (!targetId) return;
-    if (!ws || ws.readyState !== 1) return;
-    if (state.status !== 'playing') return;
-    if (state.turn !== state.playerId) return;
-    if (alreadyShot) return;
+function tryPlaceManualShip(x, y) {
+    if (state.selectedDockShipIndex === null) return;
+    const used = state.myShips.map((ship) => ship.cells.length);
+    const size = SHIP_SET[state.selectedDockShipIndex];
+    const alreadyPlacedCount = used.filter((value) => value === size).length;
+    const allowedCount = SHIP_SET.filter((value) => value === size).length;
+    if (alreadyPlacedCount >= allowedCount) return;
 
+    const cells = [];
+    for (let i = 0; i < size; i += 1) {
+        const cx = x + (state.manualOrientation === 'horizontal' ? i : 0);
+        const cy = y + (state.manualOrientation === 'vertical' ? i : 0);
+        cells.push({ x: cx, y: cy });
+    }
+
+    const occupied = new Set(state.myShips.flatMap((ship) => ship.cells.map((c) => key(c.x, c.y))));
+    for (const cell of cells) {
+        if (cell.x < 0 || cell.y < 0 || cell.x >= BOARD_SIZE || cell.y >= BOARD_SIZE) return;
+        for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+                if (occupied.has(key(cell.x + dx, cell.y + dy))) return;
+            }
+        }
+    }
+
+    state.myShips.push({ cells });
+    state.selectedDockShipIndex = null;
+    renderBoards();
+    renderShipDock();
+    if (state.myShips.length === SHIP_SET.length) unlockAchievement('Адмирал логистики');
+}
+
+function attack(targetId, x, y, alreadyShot, cellEl) {
+    if (!targetId || !ws || ws.readyState !== 1 || state.status !== 'playing' || state.turn !== state.playerId || alreadyShot) return;
+    cellEl.classList.add('shot-anim');
     ws.send(JSON.stringify({ type: 'move', targetId, x, y }));
 }
 
 function isHintCell(x, y) {
-    if (state.status !== 'playing') return false;
-    return (x + y) % 2 === 0;
+    return state.status === 'playing' && (x + y) % 2 === 0;
 }
 
-function key(x, y) {
-    return `${x}:${y}`;
-}
-
-function short(id) {
-    return id ? id.slice(0, 4) : '-';
-}
+function key(x, y) { return `${x}:${y}`; }
+function short(id) { return id ? id.slice(0, 4) : '-'; }
 
 function generateFleet() {
     const board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(0));
     const ships = [];
-
     for (const size of SHIP_SET) {
         let placed = false;
-        let attempts = 0;
-
-        while (!placed && attempts < 2000) {
-            attempts += 1;
+        for (let attempts = 0; !placed && attempts < 2000; attempts += 1) {
             const horizontal = Math.random() < 0.5;
             const startX = Math.floor(Math.random() * BOARD_SIZE);
             const startY = Math.floor(Math.random() * BOARD_SIZE);
-
             const cells = [];
-            for (let i = 0; i < size; i++) {
+            for (let i = 0; i < size; i += 1) {
                 const x = startX + (horizontal ? i : 0);
                 const y = startY + (horizontal ? 0 : i);
-                if (x >= BOARD_SIZE || y >= BOARD_SIZE) {
-                    cells.length = 0;
-                    break;
-                }
+                if (x >= BOARD_SIZE || y >= BOARD_SIZE) { cells.length = 0; break; }
                 cells.push({ x, y });
             }
-
             if (!cells.length || !canPlaceShip(board, cells)) continue;
-
-            cells.forEach((cell) => {
-                board[cell.y][cell.x] = 1;
-            });
+            cells.forEach((cell) => { board[cell.y][cell.x] = 1; });
             ships.push({ cells });
             placed = true;
         }
-
-        if (!placed) {
-            return generateFleet();
-        }
+        if (!placed) return generateFleet();
     }
-
     return ships;
 }
 
 function canPlaceShip(board, cells) {
-    for (const cell of cells) {
-        for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
+    return cells.every((cell) => {
+        for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
                 const nx = cell.x + dx;
                 const ny = cell.y + dy;
                 if (nx < 0 || ny < 0 || nx >= BOARD_SIZE || ny >= BOARD_SIZE) continue;
                 if (board[ny][nx] === 1) return false;
             }
         }
-    }
-    return true;
+        return true;
+    });
 }
 
 function loadSettings() {
     try {
         const raw = localStorage.getItem(SETTINGS_KEY);
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            state.settings = { ...state.settings, ...parsed };
-        }
+        if (raw) state.settings = { ...state.settings, ...JSON.parse(raw) };
     } catch {
-        // ignore corrupted localStorage values
+        // ignore
     }
 
     serverUrlEl.value = state.settings.serverUrl;
@@ -590,6 +595,7 @@ function loadSettings() {
     roomEl.value = state.settings.room;
     maxPlayersEl.value = state.settings.maxPlayers;
     soundToggleEl.checked = Boolean(state.settings.soundEnabled);
+    manualModeEl.checked = Boolean(state.settings.manualMode);
 }
 
 function persistSettingsFromFields() {
@@ -614,49 +620,39 @@ function generateRoomCode() {
 async function copyInvite() {
     const room = roomEl.value.trim();
     const serverUrl = serverUrlEl.value.trim();
-
-    if (!room || !serverUrl) {
-        alert('Заполните адрес сервера и код комнаты');
-        return;
-    }
-
-    const invite = `Battleship LAN\nКомната: ${room}\nСервер: ${serverUrl}`;
+    if (!room || !serverUrl) return alert('Заполните адрес сервера и код комнаты');
+    const invite = `Battleship Arena\nСервер: ${serverUrl}\nКомната: ${room}`;
     try {
         await navigator.clipboard.writeText(invite);
         setStatus('Инвайт скопирован в буфер обмена.');
     } catch {
-        setStatus('Не удалось скопировать инвайт (ограничение браузера).');
+        setStatus('Не удалось скопировать инвайт.');
     }
 }
 
 function formatTime(date) {
-    return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function playSound(kind) {
+function playSound(type) {
     if (!state.settings.soundEnabled) return;
-    const map = {
-        hit: 740,
-        miss: 280,
-        turn: 520,
-        finish: 900,
-    };
-
-    const frequency = map[kind];
-    if (!frequency) return;
-
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-
+    const context = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
     oscillator.type = 'triangle';
-    oscillator.frequency.value = frequency;
+    oscillator.frequency.value = ({ hit: 620, miss: 260, turn: 720, finish: 420 }[type] || 420);
+    gain.gain.value = 0.05;
     oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-
-    gain.gain.setValueAtTime(0.05, audioContext.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.16);
-
+    gain.connect(context.destination);
     oscillator.start();
-    oscillator.stop(audioContext.currentTime + 0.16);
+    oscillator.stop(context.currentTime + 0.12);
+}
+
+function escapeHtml(text) {
+    return text
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
 }
