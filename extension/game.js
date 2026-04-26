@@ -17,6 +17,8 @@ const state = {
     myHitsTaken: [],
     shotBoards: {},
     selectedTargetId: '',
+    leaderboard: [],
+    events: [],
 };
 
 const serverUrlEl = document.getElementById('serverUrl');
@@ -30,8 +32,11 @@ const autoPlaceBtn = document.getElementById('autoPlace');
 const sendFleetBtn = document.getElementById('sendFleet');
 const startGameBtn = document.getElementById('startGame');
 const statusEl = document.getElementById('status');
+const turnBannerEl = document.getElementById('turnBanner');
 const roomMetaEl = document.getElementById('roomMeta');
 const playersEl = document.getElementById('players');
+const leaderboardEl = document.getElementById('leaderboard');
+const eventsEl = document.getElementById('events');
 const myBoardEl = document.getElementById('myBoard');
 const enemyBoardEl = document.getElementById('enemyBoard');
 const targetSelectEl = document.getElementById('targetSelect');
@@ -96,7 +101,12 @@ function connect(action) {
         }
 
         if (data.type === 'move-result' && data.winner) {
-            setStatus(data.winner === state.playerId ? 'Победа! Вы последний выживший.' : 'Игра завершена.');
+            handleMoveResult(data);
+            return;
+        }
+
+        if (data.type === 'move-result') {
+            handleMoveResult(data);
             return;
         }
 
@@ -146,6 +156,7 @@ function applyRoomState(data) {
     state.myShips = data.yourShips || [];
     state.myHitsTaken = data.yourHitsTaken || [];
     state.shotBoards = data.shotBoards || {};
+    state.leaderboard = data.leaderboard || [];
 
     syncTargetSelect();
 
@@ -171,6 +182,9 @@ function applyRoomState(data) {
     }
 
     renderBoards();
+    renderTurnBanner();
+    renderLeaderboard();
+    renderEvents();
 }
 
 function renderPlayers() {
@@ -178,6 +192,9 @@ function renderPlayers() {
     state.players.forEach((player) => {
         const badge = document.createElement('div');
         badge.className = 'player-badge';
+        if (state.status === 'playing' && player.id === state.turn) {
+            badge.classList.add('turn');
+        }
         badge.innerHTML = `
             <strong>${player.nickname}</strong>
             <span>${short(player.id)}</span>
@@ -186,6 +203,79 @@ function renderPlayers() {
             <span>${player.alive ? '🟢 В игре' : '⚫ Выбыл'}</span>
         `;
         playersEl.appendChild(badge);
+    });
+}
+
+function renderTurnBanner() {
+    turnBannerEl.className = 'turn-banner';
+
+    if (state.status === 'waiting') {
+        turnBannerEl.textContent = 'Подготовка к бою: расставьте флот и ждите запуск от хоста.';
+        return;
+    }
+
+    if (state.status === 'playing') {
+        if (state.turn === state.playerId) {
+            turnBannerEl.textContent = '🔥 СЕЙЧАС ВАШ ХОД! Выберите живого противника и нанесите удар.';
+            turnBannerEl.classList.add('my-turn');
+            return;
+        }
+
+        const active = state.players.find((player) => player.id === state.turn);
+        turnBannerEl.textContent = `⌛ Ход игрока: ${active ? active.nickname : short(state.turn)}.`;
+        return;
+    }
+
+    if (state.status === 'finished') {
+        const winner = state.players.find((player) => player.id === state.winner);
+        turnBannerEl.textContent = winner && winner.id === state.playerId
+            ? '🏆 МАТЧ ОКОНЧЕН: ВЫ ПОБЕДИЛИ!'
+            : `🏁 Матч окончен. Победитель: ${winner ? winner.nickname : short(state.winner)}.`;
+        turnBannerEl.classList.add('finished');
+        return;
+    }
+
+    turnBannerEl.textContent = 'Игра не активна.';
+}
+
+function renderLeaderboard() {
+    leaderboardEl.innerHTML = '';
+    if (!state.leaderboard.length) {
+        leaderboardEl.textContent = 'Рейтинг появится после старта матча.';
+        return;
+    }
+
+    state.leaderboard.forEach((entry) => {
+        const row = document.createElement('div');
+        row.className = 'leaderboard-item';
+        if (entry.id === state.playerId) {
+            row.classList.add('me');
+        }
+
+        row.innerHTML = `
+            <strong>#${entry.place}</strong>
+            <span>${entry.nickname}</span>
+            <span>🎯 ${entry.hits}</span>
+            <span>💥 ${entry.kills}</span>
+            <span>🚢 ${entry.shipsSunk}</span>
+            <span>⭐ ${entry.score}</span>
+        `;
+        leaderboardEl.appendChild(row);
+    });
+}
+
+function renderEvents() {
+    eventsEl.innerHTML = '';
+    if (!state.events.length) {
+        eventsEl.textContent = 'Лента событий пуста.';
+        return;
+    }
+
+    state.events.slice(-8).reverse().forEach((message) => {
+        const eventEl = document.createElement('div');
+        eventEl.className = 'event-item';
+        eventEl.textContent = message;
+        eventsEl.appendChild(eventEl);
     });
 }
 
@@ -214,6 +304,49 @@ function syncTargetSelect() {
 
 function setStatus(text) {
     statusEl.textContent = `Статус: ${text}`;
+}
+
+function handleMoveResult(data) {
+    const attacker = playerName(data.from);
+    const defender = playerName(data.to);
+    const coord = `${data.target?.x + 1}:${data.target?.y + 1}`;
+    const shotResult = data.hit ? 'попадание' : 'мимо';
+    let message = `🎯 ${attacker} → ${defender} (${coord}): ${shotResult}.`;
+
+    if (data.shipSunk) {
+        message += ` Корабль ${defender} уничтожен!`;
+    }
+    if (data.defenderDefeated) {
+        message += ` Игрок ${defender} выбыл из матча.`;
+    }
+    if (data.winner) {
+        message += ` Победитель: ${playerName(data.winner)}.`;
+    }
+
+    pushEvent(message);
+
+    if (data.to === state.playerId && data.hit) {
+        setStatus(`По вашему флоту попал ${attacker} (${coord}).`);
+    } else if (data.from === state.playerId) {
+        if (data.hit) {
+            setStatus(data.shipSunk ? `Отличный выстрел: корабль ${defender} потоплен.` : `Есть попадание по ${defender}.`);
+        } else {
+            setStatus(`Вы промахнулись по ${defender}.`);
+        }
+    }
+}
+
+function pushEvent(message) {
+    state.events.push(message);
+    if (state.events.length > 30) {
+        state.events = state.events.slice(-30);
+    }
+    renderEvents();
+}
+
+function playerName(id) {
+    const player = state.players.find((candidate) => candidate.id === id);
+    return player ? player.nickname : short(id);
 }
 
 function autoPlace() {

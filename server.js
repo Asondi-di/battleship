@@ -108,6 +108,8 @@ wss.on('connection', (ws) => {
         const room = rooms.get(roomId);
         if (!room) return;
 
+        const disconnected = room.players.find((player) => player.id === playerId);
+
         room.players = room.players.filter((player) => player.id !== playerId);
 
         if (room.players.length === 0) {
@@ -120,7 +122,6 @@ wss.on('connection', (ws) => {
         }
 
         if (room.status === 'playing') {
-            const disconnected = room.players.find((p) => p.id === playerId);
             if (disconnected) disconnected.alive = false;
             settleWinnerIfNeeded(room);
             moveTurnToNextAlive(room, room.turn);
@@ -155,6 +156,7 @@ function handleCreateRoom(ws, playerId, data) {
         status: 'waiting',
         turn: null,
         winner: null,
+        moveNumber: 0,
         maxPlayers,
         hostId: playerId,
         players: [createPlayer(playerId, nickname, ws)],
@@ -205,6 +207,13 @@ function createPlayer(id, nickname, ws) {
         ships: [],
         hitsTaken: new Set(),
         shotsByTarget: new Map(),
+        eliminatedAtMove: null,
+        stats: {
+            hits: 0,
+            misses: 0,
+            shipsSunk: 0,
+            kills: 0,
+        },
     };
 }
 
@@ -257,7 +266,15 @@ function handleStartGame(room, playerId) {
         player.alive = true;
         player.hitsTaken = new Set();
         player.shotsByTarget = new Map();
+        player.eliminatedAtMove = null;
+        player.stats = {
+            hits: 0,
+            misses: 0,
+            shipsSunk: 0,
+            kills: 0,
+        };
     });
+    room.moveNumber = 0;
     room.turn = room.players[0].id;
 
     broadcastRoomState(room, 'Игра запущена создателем комнаты.');
@@ -304,14 +321,28 @@ function handleMove(room, playerId, targetId, x, y) {
 
     targetShots.add(key);
     attacker.shotsByTarget.set(defender.id, targetShots);
+    room.moveNumber += 1;
 
     const hit = isShipAt(defender.ships, x, y);
     if (hit) {
         defender.hitsTaken.add(key);
+        attacker.stats.hits += 1;
+    } else {
+        attacker.stats.misses += 1;
     }
 
+    const sunkShip = hit ? getShipSunkByShot(defender, x, y) : null;
+    const shipSunk = Boolean(sunkShip);
+    if (shipSunk) {
+        attacker.stats.shipsSunk += 1;
+    }
+
+    let defenderDefeated = false;
     if (defender.alive && areAllShipsSunk(defender)) {
         defender.alive = false;
+        defender.eliminatedAtMove = room.moveNumber;
+        defenderDefeated = true;
+        attacker.stats.kills += 1;
     }
 
     settleWinnerIfNeeded(room);
@@ -327,6 +358,8 @@ function handleMove(room, playerId, targetId, x, y) {
         to: defender.id,
         target: { x, y },
         hit,
+        shipSunk,
+        defenderDefeated,
         winner: room.winner,
     });
 
@@ -355,6 +388,8 @@ function moveTurnToNextAlive(room, currentPlayerId) {
 }
 
 function broadcastRoomState(room, infoMessage = null) {
+    const leaderboard = buildLeaderboard(room);
+
     room.players.forEach((viewer) => {
         const opponents = room.players.filter((player) => player.id !== viewer.id);
         const shotBoards = {};
@@ -380,6 +415,7 @@ function broadcastRoomState(room, infoMessage = null) {
             infoMessage,
             hostId: room.hostId,
             maxPlayers: room.maxPlayers,
+            moveNumber: room.moveNumber,
             you: viewer.id,
             players: room.players.map((player) => ({
                 id: player.id,
@@ -390,6 +426,7 @@ function broadcastRoomState(room, infoMessage = null) {
             yourShips: viewer.ships,
             yourHitsTaken: Array.from(viewer.hitsTaken).map(keyToPoint),
             shotBoards,
+            leaderboard,
         });
     });
 }
@@ -495,6 +532,52 @@ function shipIndexByCell(ships, x, y) {
 
 function areAllShipsSunk(player) {
     return player.ships.every((ship) => ship.cells.every((cell) => player.hitsTaken.has(pointKey(cell.x, cell.y))));
+}
+
+function getShipSunkByShot(player, x, y) {
+    const ship = player.ships.find((candidate) => candidate.cells.some((cell) => cell.x === x && cell.y === y));
+    if (!ship) return null;
+    const isSunk = ship.cells.every((cell) => player.hitsTaken.has(pointKey(cell.x, cell.y)));
+    return isSunk ? ship : null;
+}
+
+function buildLeaderboard(room) {
+    const scoreByPlayer = (player) => (
+        (player.stats.kills * 120)
+        + (player.stats.shipsSunk * 40)
+        + (player.stats.hits * 8)
+        - (player.stats.misses * 2)
+        + (player.alive ? 30 : 0)
+    );
+
+    const sorted = [...room.players].sort((a, b) => {
+        if (a.alive !== b.alive) return Number(b.alive) - Number(a.alive);
+
+        if (!a.alive && !b.alive) {
+            const aMove = a.eliminatedAtMove ?? -1;
+            const bMove = b.eliminatedAtMove ?? -1;
+            if (aMove !== bMove) return bMove - aMove;
+        }
+
+        const diffScore = scoreByPlayer(b) - scoreByPlayer(a);
+        if (diffScore !== 0) return diffScore;
+
+        if (b.stats.kills !== a.stats.kills) return b.stats.kills - a.stats.kills;
+        if (b.stats.hits !== a.stats.hits) return b.stats.hits - a.stats.hits;
+        return a.stats.misses - b.stats.misses;
+    });
+
+    return sorted.map((player, index) => ({
+        id: player.id,
+        nickname: player.nickname,
+        place: index + 1,
+        alive: player.alive,
+        hits: player.stats.hits,
+        misses: player.stats.misses,
+        kills: player.stats.kills,
+        shipsSunk: player.stats.shipsSunk,
+        score: scoreByPlayer(player),
+    }));
 }
 
 function isInsideBoard(x, y) {
